@@ -5,3 +5,9 @@ __pycache__/
 .ruff_cache/
 dist/
 .skillflow/
+
+# Local artifacts
+plan.md
+implementation-report.md
+review.md
+test-report.md
