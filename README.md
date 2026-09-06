@@ -108,6 +108,35 @@ Requirements
 
 It also supports review-driven rework, research when a fundamental assumption is wrong, and human decisions.
 
+## Development
+
+Requires [uv](https://docs.astral.sh/uv/). On a fresh checkout:
+
+```bash
+uv sync                          # create .venv with dev dependencies
+uv run pytest                    # run the test suite
+uv run ruff check . && uv run ruff format --check .   # lint and format check
+uv run skillflow --version       # run the CLI
+```
+
+`uv sync` needs the package index once to fetch the dev tools; the installed CLI
+itself has no runtime dependencies and never needs the network.
+
+## Storage layout
+
+SkillFlow keeps its durable lifecycle state in a `.skillflow/` directory at the
+root of the target repository:
+
+```text
+<repo-root>/.skillflow/
+├── skillflow.db      # lifecycle state, metadata, events (SQLite)
+├── artifacts/        # durable artifact content
+└── runs/<run-id>/    # per-run diagnostics, retained mainly on failure
+```
+
+Whether `.skillflow/` is committed or ignored is left to each target repository.
+This repository ignores it while SkillFlow dogfoods itself.
+
 ## Status
 
 🚧 **Early development**

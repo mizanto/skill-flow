@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skillflow"
+description = "Lightweight lifecycle orchestration for independent Claude Code runs."
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = []
+
+[project.scripts]
+skillflow = "skillflow.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.hatch.version]
+path = "src/skillflow/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skillflow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+src = ["src", "tests"]
+target-version = "py311"
+# SkillFlow's durable Run artifacts are Markdown at the repo root; a source
+# formatter must not have edit authority over them.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
