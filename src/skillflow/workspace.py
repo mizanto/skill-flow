@@ -7,9 +7,9 @@ later issue builds on: repository-root detection, idempotent directory creation,
 and SQLite database initialisation (SF-3, SF-A-6 §SF-003).
 
 It deliberately stops there. No entity table is created here -- the seven tables
-mirror the domain types and belong to SF-4, which consumes :func:`connect`. This
-module does not import :mod:`skillflow.domain`, so that boundary stays
-mechanically checkable.
+that mirror the domain types are built by :mod:`skillflow.store`, which consumes
+:func:`connect`. This module does not import :mod:`skillflow.domain`, so that
+boundary stays mechanically checkable.
 
 Layout::
 
@@ -50,14 +50,24 @@ RUNS_DIR_NAME = "runs"
 
 #: The workspace database layout version, stamped into SQLite ``user_version``.
 #:
-#: SF-3 stamps ``1`` for a database that has the ``.skillflow/`` container and no
-#: tables. SF-4 bumps this when it adds the entity tables. Pre-1.0 there are no
-#: migrations: a database whose stamp does not match is refused by
-#: :func:`connect` and :func:`init_workspace` with a
+#: SF-3 stamped ``1`` for a database that had the ``.skillflow/`` container and
+#: no tables; SF-4 bumped it to ``2`` when it added the seven entity tables
+#: (:mod:`skillflow.store`). The next bump belongs to whoever next changes the
+#: table layout that ships.
+#:
+#: This number tracks the layout *as released*, not per commit. While a layout
+#: change is still unmerged, editing its DDL (adding a ``CHECK``, a column) does
+#: not warrant a further bump -- ``store.open_store`` uses
+#: ``CREATE TABLE IF NOT EXISTS``, so a database built from an earlier state of
+#: the same unmerged change keeps the older table definition until it is deleted
+#: and rebuilt. Delete ``.skillflow/skillflow.db`` after any such DDL edit.
+#:
+#: Pre-1.0 there are no migrations: a database whose stamp does not match is
+#: refused by :func:`connect` and :func:`init_workspace` with a
 #: :class:`SchemaVersionError`, and the remedy is to delete
 #: ``.skillflow/skillflow.db`` and re-initialise. Must stay an ``int`` literal --
 #: ``PRAGMA user_version`` cannot be parameterised and the value is interpolated.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # A directory is a repository root if it contains either marker. Order carries
 # no meaning -- both are tested at every level and a directory holding either (or
@@ -195,7 +205,7 @@ def connect(workspace: Workspace) -> sqlite3.Connection:
     verifies the schema version, and sets ``row_factory`` to
     :class:`sqlite3.Row`. The caller owns closing the connection
     (``contextlib.closing``). Transaction and isolation semantics are left at the
-    :mod:`sqlite3` default -- SF-4 owns those.
+    :mod:`sqlite3` default -- :mod:`skillflow.store` and its callers own those.
 
     Raises :class:`WorkspaceError` if the database file does not exist or cannot
     be opened, and :class:`SchemaVersionError` on a version mismatch.

@@ -3,8 +3,8 @@
 Two kinds of test, matching ``test_domain.py``:
 
 * **Change-detectors** for cross-issue contracts -- the layout constants, the
-  public surface, and the SF-3/SF-4 boundary ("no tables created", "no
-  third-party imports").
+  public surface, and the workspace/store boundary ("no entity tables created
+  here", "no third-party imports", "no domain import").
 * **Behaviour tests** -- root detection, idempotent initialisation, and SQLite
   setup, one per documented rule and edge case.
 """
@@ -322,9 +322,9 @@ def test_database_path_blocked_by_directory_is_wrapped(tmp_path):
     assert str(repo / ".skillflow" / "skillflow.db") in str(exc.value)
 
 
-def test_sf3_creates_no_tables(tmp_path):
-    # Change-detector guarding the SF-3/SF-4 boundary: SF-4 adds the entity
-    # tables, not SF-3.
+def test_init_workspace_creates_no_entity_tables(tmp_path):
+    # Change-detector guarding the workspace/store boundary: init_workspace
+    # builds the container, skillflow.store.open_store builds the tables.
     ws = init_workspace(_repo(tmp_path))
     con = connect(ws)
     try:

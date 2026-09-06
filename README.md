@@ -129,7 +129,9 @@ root of the target repository:
 
 ```text
 <repo-root>/.skillflow/
-├── skillflow.db      # lifecycle state, metadata, events (SQLite)
+├── skillflow.db      # the seven lifecycle tables: tasks, runs, results,
+│                     # artifacts, workflow_definitions, human_decisions,
+│                     # lifecycle_events (SQLite)
 ├── artifacts/        # durable artifact content
 └── runs/<run-id>/    # per-run diagnostics, retained mainly on failure
 ```
