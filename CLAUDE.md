@@ -2,9 +2,9 @@
 
 ## Project
 
-You are working on SkillFlow: a lightweight lifecycle orchestration layer for independent bounded Claude Code Runs.
+You are working on Skill Flow: a lightweight lifecycle orchestration layer for independent bounded Claude Code Runs.
 
-Claude Code performs the actual work. SkillFlow owns durable lifecycle state, artifacts, deterministic Context Selection, and deterministic Lifecycle Evaluation.
+Claude Code performs the actual work. Skill Flow owns durable lifecycle state, artifacts, deterministic Context Selection, and deterministic Lifecycle Evaluation.
 
 Keep the implementation small and explicit.
 
@@ -24,22 +24,22 @@ If specifications contradict each other, do not silently reinterpret the archite
 ## Architecture rules
 
 - Claude Code is the execution layer.
-- SkillFlow is the lifecycle orchestration layer.
+- Skill Flow is the lifecycle orchestration layer.
 - Runs are bounded and independent.
 - Artifacts are durable context between Runs.
 - Lifecycle Evaluation is deterministic.
 - Context Selection is deterministic in v0.
 - Workflow Definition is a definition, not a runtime instance.
-- SkillFlow does not automatically launch Claude Code.
+- Skill Flow does not automatically launch Claude Code.
 - The next Run is not created in the current Claude Code session.
 
 Do not introduce Router, Transition, Loop, Iteration, Rework, Handoff, Workflow Instance, or Stage as first-class concepts.
 
-Do not turn SkillFlow into a generic workflow engine.
+Do not turn Skill Flow into a generic workflow engine.
 
 ## Development protocol
 
-Develop SkillFlow using three primary Runs:
+Develop Skill Flow using three primary Runs:
 
 ```text
 Plan — Opus
@@ -173,7 +173,7 @@ Review against:
 
 1. original task;
 2. approved plan;
-3. SkillFlow architecture.
+3. Skill Flow architecture.
 
 Check:
 
@@ -266,7 +266,7 @@ Opus review
 
 Use the smallest change that addresses the finding.
 
-## SkillFlow command protocol
+## Skill Flow command protocol
 
 Public commands:
 
@@ -279,16 +279,16 @@ Public commands:
 
 Do not invent additional lifecycle commands.
 
-When operating inside a SkillFlow Run:
+When operating inside a Skill Flow Run:
 
 1. Resolve the Task before lifecycle work.
 2. Execute only the resolved Run.
 3. Do not start another Run in the same session.
-4. Use SkillFlow commands for lifecycle state changes.
+4. Use Skill Flow commands for lifecycle state changes.
 5. Use normal Claude Code tools for project work.
 6. Prepare durable artifacts before completing the Run.
 7. Complete the current Run before reporting the next action.
-8. Never manually edit SkillFlow lifecycle state.
+8. Never manually edit Skill Flow lifecycle state.
 9. Report the next action and command needed for the next Run.
 
 Before completing a Run:

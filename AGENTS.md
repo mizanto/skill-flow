@@ -2,9 +2,9 @@
 
 ## Project
 
-SkillFlow is a lightweight lifecycle orchestration layer for connecting independent bounded Runs.
+Skill Flow is a lightweight lifecycle orchestration layer for connecting independent bounded Runs.
 
-Claude Code is the execution layer. SkillFlow owns durable lifecycle state, durable artifacts, deterministic context selection, and deterministic lifecycle evaluation.
+Claude Code is the execution layer. Skill Flow owns durable lifecycle state, durable artifacts, deterministic context selection, and deterministic lifecycle evaluation.
 
 Keep the project small. Do not turn it into another AI-agent runtime or a generic workflow engine.
 
@@ -65,7 +65,7 @@ MVP:
 
 - artifact content is stored in the filesystem;
 - artifact metadata is stored in SQLite;
-- content and SkillFlow metadata are separate;
+- content and Skill Flow metadata are separate;
 - artifacts are logically immutable;
 - new content creates a new artifact object/version;
 - Git is not required for artifact versioning.
@@ -154,13 +154,13 @@ Conceptual SQLite tables:
 
 Lifecycle events are audit/debug/history data, not event sourcing. Current state must be directly queryable without replaying events.
 
-SkillFlow-owned state lives under `.skillflow/` at the target repository root.
+Skill Flow-owned state lives under `.skillflow/` at the target repository root.
 
 ## Execution boundary
 
 Each Run is one independent Claude Code session in the MVP.
 
-SkillFlow does not automatically launch Claude Code.
+Skill Flow does not automatically launch Claude Code.
 
 A completed Run must not continue into another Run in the same session.
 
@@ -309,7 +309,7 @@ Review against:
 
 1. the task;
 2. the approved plan;
-3. the SkillFlow architecture;
+3. the Skill Flow architecture;
 4. tests;
 5. MVP constraints.
 
