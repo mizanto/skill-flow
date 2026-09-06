@@ -36,6 +36,7 @@ from skillflow.domain import (
     WorkflowDefinition,
 )
 from skillflow.store import (
+    InvariantViolationError,
     get_artifact,
     get_result,
     get_result_for_run,
@@ -182,6 +183,7 @@ def _seed_task_run(connection, *, task_id="task-1", run_id="run-1"):
 
 def test_public_surface():
     assert set(store.__all__) == {
+        "InvariantViolationError",
         "open_store",
         "insert_task",
         "insert_run",
@@ -263,10 +265,10 @@ def test_store_module_imports_are_stdlib_plus_two_skillflow_modules():
     }
 
 
-def test_schema_version_is_two():
+def test_schema_version_is_three():
     from skillflow import workspace
 
-    assert workspace.SCHEMA_VERSION == 2
+    assert workspace.SCHEMA_VERSION == 3
 
 
 def test_insert_artifact_writes_no_file(ws, conn):
@@ -318,7 +320,17 @@ def test_run_instructions_empty_string_is_distinct_from_none(conn):
     with conn:
         insert_task(conn, _task())
         insert_run(conn, _run(id="r-empty", instructions="", trigger_reason=None))
-        insert_run(conn, _run(id="r-null", instructions=None, trigger_reason=None))
+        # r-null is terminal: two running Runs on one Task is an SF-5 violation,
+        # and this test is about the nullable TEXT column, not Run status.
+        insert_run(
+            conn,
+            _run(
+                id="r-null",
+                instructions=None,
+                trigger_reason=None,
+                status=RunStatus.COMPLETED,
+            ),
+        )
     assert get_run(conn, "r-empty").instructions == ""
     assert get_run(conn, "r-null").instructions is None
 
@@ -500,7 +512,17 @@ def test_timestamp_ordering_matches_chronology_as_text(conn):
                 trigger_reason=None,
             ),
         )
-        insert_run(conn, _run(id="run-late", created_at=LATER, trigger_reason=None))
+        # run-late is terminal: one running Run per Task (SF-5). This test is
+        # about text ordering of created_at, not status.
+        insert_run(
+            conn,
+            _run(
+                id="run-late",
+                created_at=LATER,
+                trigger_reason=None,
+                status=RunStatus.COMPLETED,
+            ),
+        )
 
     assert [r.id for r in list_runs_for_task(conn, "task-1")] == [
         "run-early",
@@ -630,7 +652,12 @@ def test_initial_run_provenance_round_trips(conn):
 def test_triggered_run_provenance_round_trips(conn):
     with conn:
         insert_task(conn, _task())
-        insert_run(conn, _run(id="run-1", created_at=EARLIER))
+        # run-1 is terminal: run-2 below is running, and one running Run per Task
+        # is an SF-5 invariant. The provenance link under test is unaffected.
+        insert_run(
+            conn,
+            _run(id="run-1", created_at=EARLIER, status=RunStatus.COMPLETED),
+        )
         triggered = _run(
             id="run-2",
             created_at=NOW,
@@ -660,9 +687,14 @@ def test_result_with_missing_run_is_rejected(conn):
             insert_result(conn, _result(run_id="ghost"))
 
 
-def test_artifact_with_missing_task_is_rejected(conn):
+def test_artifact_naming_a_run_outside_its_task_is_rejected(conn):
+    # _artifact names run-1, which exists and belongs to task-1, so task_id
+    # "ghost" is a *cross-parent* violation (SF-5), not a missing parent: once a
+    # Run is named, task_id is only meaningful relative to it. With run_id
+    # NOT NULL + the composite FK, artifacts.task_id REFERENCES tasks(id) is
+    # unreachable through the public API -- a harmless belt-and-braces constraint.
     _seed_task_run(conn)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(InvariantViolationError):
         with conn:
             insert_artifact(conn, _artifact(task_id="ghost"))
 
@@ -780,22 +812,33 @@ def test_get_result_for_run_links_result_to_run(conn):
     assert get_result_for_run(conn, "run-1") == result
 
 
-def test_get_result_for_run_returns_the_earliest_result(conn):
-    # SF-4 tolerates multiple Results per Run until SF-5's uniqueness invariant
-    # lands, so the ORDER BY ... LIMIT 1 must be exercised against that state.
+def test_get_result_for_run_returns_the_single_canonical_result(conn):
+    # SF-5: one canonical Result per Run. A second insert for the same Run is
+    # rejected, so get_result_for_run resolves to exactly the one that landed.
     _seed_task_run(conn)
     with conn:
-        insert_result(conn, _result(id="res-late", created_at=LATER))
-        insert_result(conn, _result(id="res-early", created_at=NOW))
-    assert get_result_for_run(conn, "run-1").id == "res-early"
+        insert_result(conn, _result(id="res-canonical", created_at=NOW))
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_result(conn, _result(id="res-second", created_at=LATER))
+    assert get_result_for_run(conn, "run-1").id == "res-canonical"
 
 
 def test_list_ordering_is_deterministic_across_equal_created_at(conn):
     with conn:
         insert_task(conn, _task())
-        # Same created_at; inserted out of id order.
+        # Same created_at; inserted out of id order. run-a is terminal so the
+        # two Runs do not trip the one-running-Run-per-Task invariant (SF-5).
         insert_run(conn, _run(id="run-b", created_at=NOW, trigger_reason=None))
-        insert_run(conn, _run(id="run-a", created_at=NOW, trigger_reason=None))
+        insert_run(
+            conn,
+            _run(
+                id="run-a",
+                created_at=NOW,
+                trigger_reason=None,
+                status=RunStatus.COMPLETED,
+            ),
+        )
     assert [r.id for r in list_runs_for_task(conn, "task-1")] == ["run-a", "run-b"]
 
 
@@ -874,7 +917,16 @@ def test_update_does_not_rewrite_immutable_columns(conn):
     # when the passed snapshot carries different values.
     with conn:
         insert_task(conn, _task(id="t-imm", created_at=EARLIER, updated_at=EARLIER))
-        insert_run(conn, _run(id="r-src", task_id="t-imm", created_at=EARLIER))
+        # r-src is terminal: r-imm below is running, one running Run per Task.
+        insert_run(
+            conn,
+            _run(
+                id="r-src",
+                task_id="t-imm",
+                created_at=EARLIER,
+                status=RunStatus.COMPLETED,
+            ),
+        )
         insert_run(
             conn,
             _run(
@@ -933,28 +985,306 @@ def test_update_task_rejecting_out_of_order_timestamps_keeps_row_readable(conn):
     assert got.updated_at == NOW
 
 
-def test_update_run_does_not_reject_terminal_to_running(conn):
-    # Change-detector: transition validation ("terminal Runs cannot become
-    # running") is SF-5's deliverable, deliberately absent here.
+# --- SF-5: one running Run per Task ----------------------------------
+
+_TERMINAL_RUN_STATUSES = [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED]
+
+
+def test_second_running_run_for_a_task_is_rejected(conn):
     with conn:
         insert_task(conn, _task())
-        insert_run(
+        insert_run(conn, _run(id="run-1"))
+    with pytest.raises(InvariantViolationError) as exc:
+        with conn:
+            insert_run(conn, _run(id="run-2", trigger_reason=None))
+    message = str(exc.value)
+    assert "run-1" in message and "run-2" in message and "task-1" in message
+
+
+def test_running_runs_in_different_tasks_are_allowed(conn):
+    with conn:
+        insert_task(conn, _task(id="task-1"))
+        insert_task(conn, _task(id="task-2"))
+        insert_run(conn, _run(id="run-1", task_id="task-1"))
+        insert_run(conn, _run(id="run-2", task_id="task-2"))
+    assert get_run(conn, "run-1").status is RunStatus.RUNNING
+    assert get_run(conn, "run-2").status is RunStatus.RUNNING
+
+
+def test_a_new_running_run_is_allowed_after_the_previous_one_completes(conn):
+    # The retry flow: a Run is never resumed, its successor is a new running Run.
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1"))
+        update_run(
             conn,
             _run(
-                id="r-back",
+                id="run-1",
                 status=RunStatus.COMPLETED,
                 completed_at=LATER,
                 trigger_reason=TRIGGER_REASON_INITIAL,
             ),
         )
-        revived = _run(
-            id="r-back",
-            status=RunStatus.RUNNING,
-            created_at=NOW,
-            trigger_reason=TRIGGER_REASON_INITIAL,
+        insert_run(
+            conn,
+            _run(
+                id="run-2",
+                trigger_reason="review_changes_requested",
+                triggered_by_run_id="run-1",
+            ),
         )
-        update_run(conn, revived)
-    assert get_run(conn, "r-back").status is RunStatus.RUNNING
+    assert get_run(conn, "run-2").status is RunStatus.RUNNING
+
+
+def test_a_rejected_running_run_leaves_no_partial_mutation(conn):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1"))
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_lifecycle_event(conn, _event(id="ev-legal"))
+            insert_run(conn, _run(id="run-2", trigger_reason=None))
+    # The whole transaction rolled back: the legal insert did not land either.
+    assert list_lifecycle_events_for_task(conn, "task-1") == []
+    assert [r.id for r in list_runs_for_task(conn, "task-1")] == ["run-1"]
+
+
+def test_database_rejects_a_second_running_run_written_by_raw_sql(conn):
+    # Bypass the Python pre-check: the partial index is the real guarantee.
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1"))
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute(
+                "INSERT INTO runs (id, task_id, status, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("run-2", "task-1", "running", store._dt(NOW)),
+            )
+
+
+# --- SF-5: legal Run status transitions -----------------------------
+
+
+@pytest.mark.parametrize("terminal", _TERMINAL_RUN_STATUSES)
+def test_terminal_run_cannot_become_running(conn, terminal):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(
+            conn,
+            _run(id="run-1", status=terminal, trigger_reason=TRIGGER_REASON_INITIAL),
+        )
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            update_run(
+                conn,
+                _run(
+                    id="run-1",
+                    status=RunStatus.RUNNING,
+                    trigger_reason=TRIGGER_REASON_INITIAL,
+                ),
+            )
+    assert get_run(conn, "run-1").status is terminal  # row not poisoned
+
+
+def test_waiting_for_human_run_cannot_become_running(conn):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1", status=RunStatus.WAITING_FOR_HUMAN))
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            update_run(conn, _run(id="run-1", status=RunStatus.RUNNING))
+    assert get_run(conn, "run-1").status is RunStatus.WAITING_FOR_HUMAN
+
+
+def test_terminal_run_status_cannot_change_to_another_terminal_status(conn):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1", status=RunStatus.COMPLETED))
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            update_run(conn, _run(id="run-1", status=RunStatus.FAILED))
+    assert get_run(conn, "run-1").status is RunStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        RunStatus.RUNNING,
+        RunStatus.WAITING_FOR_HUMAN,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+    ],
+)
+def test_running_run_can_move_to_each_other_status(conn, target):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1"))
+        update_run(
+            conn,
+            _run(id="run-1", status=target, trigger_reason=TRIGGER_REASON_INITIAL),
+        )
+    assert get_run(conn, "run-1").status is target
+
+
+def test_same_status_update_is_allowed_on_a_terminal_run(conn):
+    # An over-tight rule would break update_run's other mutable columns.
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1", status=RunStatus.COMPLETED))
+        update_run(
+            conn,
+            _run(
+                id="run-1",
+                status=RunStatus.COMPLETED,
+                trigger_reason=TRIGGER_REASON_INITIAL,
+                transcript_ref="claude://transcript/7",
+            ),
+        )
+    assert get_run(conn, "run-1").transcript_ref == "claude://transcript/7"
+
+
+def test_waiting_for_human_run_can_reach_a_terminal_status(conn):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1", status=RunStatus.WAITING_FOR_HUMAN))
+        update_run(conn, _run(id="run-1", status=RunStatus.CANCELLED))
+    assert get_run(conn, "run-1").status is RunStatus.CANCELLED
+
+
+def test_legal_run_transitions_cover_every_run_status():
+    # Change-detector: a new RunStatus member forces an explicit decision;
+    # nothing but a running Run may transition *into* running; and a terminal
+    # Run is final -- each terminal status maps to itself only, so widening one
+    # to another terminal status (a plausible edit) fails here loudly.
+    assert set(store._LEGAL_RUN_TRANSITIONS) == set(RunStatus)
+    for source, targets in store._LEGAL_RUN_TRANSITIONS.items():
+        if RunStatus.RUNNING in targets:
+            assert source is RunStatus.RUNNING
+    for terminal in _TERMINAL_RUN_STATUSES:
+        assert store._LEGAL_RUN_TRANSITIONS[terminal] == frozenset({terminal})
+
+
+# --- SF-5: one canonical Result per Run -----------------------------
+
+
+def test_duplicate_result_for_a_run_is_rejected(conn):
+    _seed_task_run(conn)
+    with conn:
+        insert_result(conn, _result(id="result-1"))
+    with pytest.raises(InvariantViolationError) as exc:
+        with conn:
+            insert_result(conn, _result(id="result-2"))
+    message = str(exc.value)
+    assert "result-1" in message and "result-2" in message and "run-1" in message
+
+
+def test_results_for_different_runs_are_allowed(conn):
+    with conn:
+        insert_task(conn, _task())
+        insert_run(conn, _run(id="run-1", status=RunStatus.COMPLETED))
+        insert_run(conn, _run(id="run-2", trigger_reason=None))
+        insert_result(conn, _result(id="result-1", run_id="run-1"))
+        insert_result(conn, _result(id="result-2", run_id="run-2"))
+    assert get_result_for_run(conn, "run-1").id == "result-1"
+    assert get_result_for_run(conn, "run-2").id == "result-2"
+
+
+def test_database_rejects_a_duplicate_result_written_by_raw_sql(conn):
+    _seed_task_run(conn)
+    with conn:
+        insert_result(conn, _result(id="result-1"))
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute(
+                "INSERT INTO results (id, run_id, status, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("result-2", "run-1", "completed", store._dt(NOW)),
+            )
+
+
+# --- SF-5: cross-parent consistency --------------------------------
+
+
+def _seed_two_tasks_each_with_a_run(connection):
+    with connection:
+        insert_task(connection, _task(id="task-1"))
+        insert_task(connection, _task(id="task-2"))
+        insert_run(connection, _run(id="run-1", task_id="task-1"))
+        insert_run(connection, _run(id="run-2", task_id="task-2"))
+
+
+def test_artifact_naming_a_run_from_another_task_is_rejected(conn):
+    _seed_two_tasks_each_with_a_run(conn)
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_artifact(conn, _artifact(id="a-x", task_id="task-1", run_id="run-2"))
+
+
+def test_human_decision_naming_a_run_from_another_task_is_rejected(conn):
+    _seed_two_tasks_each_with_a_run(conn)
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_human_decision(
+                conn, _decision(id="hd-x", task_id="task-1", run_id="run-2")
+            )
+
+
+def test_lifecycle_event_naming_a_run_from_another_task_is_rejected(conn):
+    _seed_two_tasks_each_with_a_run(conn)
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_lifecycle_event(
+                conn,
+                _event(
+                    id="ev-x",
+                    task_id="task-1",
+                    run_id="run-2",
+                    type=LifecycleEventType.RUN_COMPLETED,
+                ),
+            )
+
+
+def test_list_artifacts_for_task_cannot_return_a_run_from_another_task(conn):
+    # The reason the invariant exists: "durable context per Task" must not leak.
+    _seed_two_tasks_each_with_a_run(conn)
+    with conn:
+        insert_artifact(conn, _artifact(id="a-1", task_id="task-1", run_id="run-1"))
+    with pytest.raises(InvariantViolationError):
+        with conn:
+            insert_artifact(conn, _artifact(id="a-2", task_id="task-1", run_id="run-2"))
+    got = list_artifacts_for_task(conn, "task-1")
+    assert [a.id for a in got] == ["a-1"]
+    assert all(a.run_id == "run-1" for a in got)
+
+
+def test_database_rejects_a_cross_parent_artifact_written_by_raw_sql(conn):
+    _seed_two_tasks_each_with_a_run(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute(
+                "INSERT INTO artifacts (id, task_id, run_id, name, type, version, "
+                "path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("a-x", "task-1", "run-2", "plan.md", "plan", 1, "p", store._dt(NOW)),
+            )
+
+
+# --- SF-5: schema change-detectors --------------------------------
+
+
+def test_running_literal_in_the_partial_index_matches_run_status_enum():
+    assert f"status = '{RunStatus.RUNNING.value}'" in store._SCHEMA_SQL
+
+
+def test_partial_running_index_is_created_by_open_store(conn):
+    # test_open_store_creates_exactly_the_seven_conceptual_tables already proves
+    # the index is not mistaken for a table; this confirms it actually exists.
+    index = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ("runs_one_running_per_task",),
+    ).fetchone()
+    assert index is not None
 
 
 # --- current state is directly queryable -----------------------------

@@ -52,8 +52,12 @@ RUNS_DIR_NAME = "runs"
 #:
 #: SF-3 stamped ``1`` for a database that had the ``.skillflow/`` container and
 #: no tables; SF-4 bumped it to ``2`` when it added the seven entity tables
-#: (:mod:`skillflow.store`). The next bump belongs to whoever next changes the
-#: table layout that ships.
+#: (:mod:`skillflow.store`); SF-5 bumped it to ``3`` when it added the invariant
+#: constraints (a partial unique index, ``UNIQUE`` on ``results.run_id``, and
+#: composite foreign keys). A version-2 database keeps its unconstrained tables
+#: because ``open_store`` uses ``CREATE TABLE IF NOT EXISTS``, so it is refused
+#: here rather than silently under-enforced. The next bump belongs to whoever
+#: next changes the table layout that ships.
 #:
 #: This number tracks the layout *as released*, not per commit. While a layout
 #: change is still unmerged, editing its DDL (adding a ``CHECK``, a column) does
@@ -67,7 +71,7 @@ RUNS_DIR_NAME = "runs"
 #: :class:`SchemaVersionError`, and the remedy is to delete
 #: ``.skillflow/skillflow.db`` and re-initialise. Must stay an ``int`` literal --
 #: ``PRAGMA user_version`` cannot be parameterised and the value is interpolated.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # A directory is a repository root if it contains either marker. Order carries
 # no meaning -- both are tested at every level and a directory holding either (or
