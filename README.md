@@ -119,8 +119,9 @@ uv run ruff check . && uv run ruff format --check .   # lint and format check
 uv run skillflow --version       # run the CLI
 ```
 
-`uv sync` needs the package index once to fetch the dev tools; the installed CLI
-itself has no runtime dependencies and never needs the network.
+`uv sync` needs the package index once to fetch the dev tools and the single
+runtime dependency (PyYAML, used to read Workflow Definition files); the
+installed CLI itself never needs the network.
 
 ## Storage layout
 

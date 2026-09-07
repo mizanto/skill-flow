@@ -1,0 +1,4 @@
+name: broken
+steps:
+  - id: a
+   skill: b

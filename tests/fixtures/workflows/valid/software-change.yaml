@@ -1,0 +1,48 @@
+# Test fixture, NOT the SF-9 reference workflow deliverable.
+# Exercises the four SF-A-4 §14 acceptance scenarios through the loader.
+name: software-change
+
+steps:
+  - id: requirements
+    skill: requirements-analysis
+    model: opus
+    effort: high
+    outputs:
+      - type: requirements
+        required: true
+    outcomes:
+      ready: { action: run, step: decomposition }
+
+  - id: decomposition
+    skill: decomposition
+    model: opus
+    effort: high
+    outputs:
+      - type: plan
+        required: true
+    outcomes:
+      ready: { action: run, step: implementation }
+
+  - id: implementation
+    skill: implementation
+    model: sonnet
+    effort: high
+    outcomes:
+      ready: { action: run, step: review }
+
+  - id: review
+    skill: code-review
+    model: opus
+    effort: high
+    outputs:
+      - type: review
+        required: true
+    outcomes:
+      approved:                     { action: complete }
+      changes_requested:            { action: run, step: implementation }
+      fundamental_assumption_wrong: { action: run, skill: research }
+      human_required:               { action: human }
+    decisions:
+      approve:         { action: complete }
+      request_changes: { action: run, step: implementation }
+      cancel:          { action: cancel }

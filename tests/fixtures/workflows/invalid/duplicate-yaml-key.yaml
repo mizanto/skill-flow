@@ -1,0 +1,5 @@
+name: w
+steps:
+  - id: a
+    skill: b
+    skill: c

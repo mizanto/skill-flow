@@ -1,0 +1,5 @@
+# Smallest valid definition: no optional keys at all.
+name: minimal
+steps:
+  - id: only
+    skill: implementation

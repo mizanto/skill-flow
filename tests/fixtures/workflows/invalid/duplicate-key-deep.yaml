@@ -1,0 +1,11 @@
+name: w
+steps:
+  - id: review
+    skill: code-review
+    outcomes:
+      approved: { action: complete }
+      changes_requested: { action: run, step: review }
+      human_required: { action: run, step: review }
+      approved: { action: cancel }
+    decisions:
+      approve: { action: complete }

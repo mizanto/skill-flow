@@ -1,0 +1,7 @@
+name: w
+steps:
+  - id: a
+    skill: b
+    outcomes:
+      ready: { action: complete }
+      ready: { action: cancel }

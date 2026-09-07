@@ -13,9 +13,11 @@ Command Contract v0 (SF-A-5 §4.8, §6.5, §7), Implementation Plan v0 (SF-A-6 �
   `(id, name)` identity row a Task references. The loaded procedure
   (`Workflow` / `WorkflowStep`) is configuration read from disk. Binding the two
   by id is a later issue (SF-008 / SF-010).
-- **Not loaded here.** YAML parsing and file validation are SF-008. The
-  reference `software-change` definition file is SF-009. This module is
-  stdlib-only and performs no IO.
+- **Loaded separately.** `skillflow/workflow.py` is stdlib-only and performs no
+  IO; reading a definition file into these objects is
+  [`skillflow/workflow_loader.py`](../src/skillflow/workflow_loader.py), covered
+  in [Loading](#loading) below. The reference `software-change` definition file
+  is still a separate deliverable (SF-009).
 - **Not a runtime instance.** Only immutable value objects — no current-step
   pointer, no mutable state. The actual lifecycle is the sequence of Runs.
 - **Not a generic workflow DSL.** A fixed field set, four action types, and
@@ -114,11 +116,78 @@ All violations raise `ValueError` at construction.
 - **`Workflow`**: `name` non-blank; `steps` iterable, non-empty and all
   `WorkflowStep`; step `id`s unique; every referenced `OutcomeRule.step` exists.
 
-## Illustrative example
+## Loading
 
-> This example is **illustrative only**. It is not the SF-009 reference
-> workflow, which is a YAML file loaded through SF-008. The v0 schema has no
-> YAML loader yet; the example below shows the equivalent structure.
+A Workflow Definition is written as a YAML file in exactly the format of the
+[example](#file-format) below, and read with
+[`skillflow/workflow_loader.py`](../src/skillflow/workflow_loader.py):
+
+```python
+from skillflow.workflow_loader import WorkflowLoadError, load_workflow, parse_workflow
+
+workflow = load_workflow("workflows/software-change.yaml")   # from a path
+workflow = parse_workflow(text, source="inline.yaml")        # from a string
+```
+
+The loader owns **syntax and shape**; the schema above owns **meaning**. No
+validation rule is implemented twice: the loader parses the document, checks its
+structure, and constructs the value objects, letting their `ValueError` carry
+every semantic rule.
+
+There is no discovery: `load_workflow` reads the path it is given. Where
+definition files live is decided by a later issue (SF-009 / SF-011). A loaded
+`Workflow` is configuration, not a runtime entity, and is not persisted.
+
+### Strictness rules
+
+Three rejections belong to the loader because they are invisible by the time
+value objects exist:
+
+- **Unknown keys are rejected** at every level (top level, step, output, rule).
+  `outcome:` — the singular typo for `outcomes:` — fails loudly instead of
+  silently producing a step with no outcomes. A fixed key set is also what keeps
+  the file format from drifting into a generic workflow DSL.
+- **Duplicate YAML keys are rejected.** PyYAML keeps the last duplicate
+  silently, so two `approved:` entries under one `outcomes:` would otherwise
+  load as valid with one rule discarded.
+- **Null-valued keys are rejected**, not coerced to empty. A key written with no
+  value is always an error: `outcomes:` alone, and equally `model:` alone. Where
+  an empty collection is meaningful, write it explicitly — `{}` for `outcomes` /
+  `decisions`, `[]` for `outputs`. This does not apply to `steps`, which is
+  required and may not be empty.
+- **Merge keys (`<<`) are rejected.** Anchors and aliases are fine — `skill:
+  *shared` reuses a *value* — but `<<: *base` inherits one mapping's keys into
+  another, which is definition reuse and the DSL drift this format avoids. Write
+  each step out in full.
+
+Only the **mapping form** of an outcome rule is accepted
+(`approved: { action: complete }`). The shorthand `approved: complete` is not
+supported — two syntaxes for one concept is the first step toward a DSL — and it
+is rejected with a message that says so rather than a bare type error.
+
+Note that YAML 1.1 booleans apply: `required: no` loads as `False` (correct),
+while `skill: yes` loads as `True` and is then rejected as not a string. Quote
+such values.
+
+### Errors
+
+Every failure — a missing path, a directory, undecodable bytes, invalid YAML, a
+shape violation, or a schema violation — raises `WorkflowLoadError`. It is a
+flat exception class (like `store.InvariantViolationError`) and deliberately
+**not** a `ValueError` subclass, so catching it does not also swallow
+programming errors. Every message names the source file and the location within
+it:
+
+```text
+software-change.yaml: steps[3].outcomes['approved']: OutcomeRule with action
+'complete' must not carry a 'step' or 'skill'
+```
+
+## File format
+
+> The example below is the documented file format. It is **not** the SF-009
+> reference `software-change` definition, which is a separate deliverable; this
+> shows the equivalent structure.
 
 ```yaml
 name: software-change

@@ -1,0 +1,7 @@
+name: w
+steps:
+  - &base
+    id: a
+    skill: implementation
+  - id: b
+    <<: *base

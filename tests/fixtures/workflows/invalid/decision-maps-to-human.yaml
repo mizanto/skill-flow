@@ -1,0 +1,8 @@
+name: w
+steps:
+  - id: a
+    skill: b
+    outcomes:
+      human_required: { action: human }
+    decisions:
+      escalate: { action: human }

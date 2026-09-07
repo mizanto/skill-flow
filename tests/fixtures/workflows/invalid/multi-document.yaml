@@ -1,0 +1,9 @@
+name: one
+steps:
+  - id: a
+    skill: b
+---
+name: two
+steps:
+  - id: c
+    skill: d

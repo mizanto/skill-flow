@@ -1,0 +1,10 @@
+# Identifiers carry surrounding whitespace; the schema strips them.
+name: "  padded-workflow  "
+steps:
+  - id: "  only  "
+    skill: "  implementation  "
+    model: "  opus  "
+    effort: "  high  "
+    outputs:
+      - type: "  review  "
+        required: false

@@ -1,0 +1,8 @@
+# The empty forms the loader's error messages tell authors to write.
+name: explicit-empty
+steps:
+  - id: only
+    skill: implementation
+    outputs: []
+    outcomes: {}
+    decisions: {}

@@ -1,0 +1,7 @@
+name: w
+steps:
+  - id: a
+    skill: b
+    outputs:
+      - name: review
+        type: review
