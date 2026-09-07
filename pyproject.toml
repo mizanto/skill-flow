@@ -8,7 +8,7 @@ description = "Lightweight lifecycle orchestration for independent Claude Code r
 readme = "README.md"
 requires-python = ">=3.14"
 dynamic = ["version"]
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0,<7"]
 
 [project.scripts]
 skillflow = "skillflow.cli:main"
