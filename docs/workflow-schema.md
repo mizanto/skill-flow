@@ -72,7 +72,11 @@ allowed (the reference `implementation` step declares none).
 | `type`     | `str`  | Required, non-blank, stripped. |
 | `required` | `bool` | Default `True`. Must be a real `bool` (an `int` is rejected). |
 
-Declares an expected durable output. Checking artifacts against it is SF-017.
+Declares an expected durable output. Checking a step's declared outputs against
+the artifacts a Run registered is `skillflow.outputs.validate_outputs` (SF-16):
+the match scope is the current Run (the `(task_id, name)` version chain spans
+Runs), matching is by `type` exactly, and the declared constraint set is exactly
+`{type, required}`.
 
 ### `OutcomeRule`
 

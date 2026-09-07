@@ -103,8 +103,9 @@ class ExpectedOutput:
     """A durable output a step is expected to produce (SF-A-5 §4.8 ``outputs:``).
 
     ``type`` names the artifact kind (e.g. ``"review"``); ``required`` gates
-    completion. Checking artifacts against this declaration is SF-017 -- this
-    schema only declares it.
+    completion. Checking a step's declared outputs against the artifacts a Run
+    registered is :func:`skillflow.outputs.validate_outputs` (SF-16) -- this
+    schema only declares them.
     """
 
     type: str

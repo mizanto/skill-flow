@@ -101,6 +101,7 @@ __all__ = [
     "latest_artifact",
     "list_runs_for_task",
     "list_artifacts_for_task",
+    "list_artifacts_for_run",
     "list_human_decisions_for_task",
     "list_lifecycle_events_for_task",
 ]
@@ -792,6 +793,21 @@ def list_artifacts_for_task(conn: sqlite3.Connection, task_id: str) -> list[Arti
     rows = conn.execute(
         "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at, id",
         (task_id,),
+    ).fetchall()
+    return [_to_artifact(row) for row in rows]
+
+
+def list_artifacts_for_run(conn: sqlite3.Connection, run_id: str) -> list[Artifact]:
+    """Return every Artifact registered by ``run_id``, ordered by ``created_at, id``.
+
+    The per-Run half of :func:`list_artifacts_for_task`: SF-16 checks a step's
+    declared outputs against the artifacts the *current* Run produced, because
+    the ``(task_id, name)`` version chain spans Runs (SF-A-1 §7) and a Task-level
+    match would let a rework Run pass on an earlier Run's artifact.
+    """
+    rows = conn.execute(
+        "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, id",
+        (run_id,),
     ).fetchall()
     return [_to_artifact(row) for row in rows]
 

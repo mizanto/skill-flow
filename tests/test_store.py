@@ -51,6 +51,7 @@ from skillflow.store import (
     insert_task,
     insert_workflow_definition,
     latest_artifact,
+    list_artifacts_for_run,
     list_artifacts_for_task,
     list_human_decisions_for_task,
     list_lifecycle_events_for_task,
@@ -204,6 +205,7 @@ def test_public_surface():
         "latest_artifact",
         "list_runs_for_task",
         "list_artifacts_for_task",
+        "list_artifacts_for_run",
         "list_human_decisions_for_task",
         "list_lifecycle_events_for_task",
     }
@@ -1324,6 +1326,102 @@ def test_list_artifacts_for_task_cannot_return_a_run_from_another_task(conn):
     got = list_artifacts_for_task(conn, "task-1")
     assert [a.id for a in got] == ["a-1"]
     assert all(a.run_id == "run-1" for a in got)
+
+
+def _seed_task_with_two_runs(connection, *, task_id="task-1"):
+    """Insert one Task with a completed Run and a running Run."""
+    with connection:
+        insert_task(connection, _task(id=task_id))
+        insert_run(
+            connection,
+            _run(
+                id="run-a",
+                task_id=task_id,
+                status=RunStatus.COMPLETED,
+                created_at=EARLIER,
+            ),
+        )
+        insert_run(
+            connection,
+            _run(
+                id="run-b",
+                task_id=task_id,
+                status=RunStatus.RUNNING,
+                created_at=NOW,
+                trigger_reason="changes_requested",
+                triggered_by_run_id="run-a",
+            ),
+        )
+
+
+def test_list_artifacts_for_run_returns_only_that_runs_artifacts(conn):
+    _seed_task_with_two_runs(conn)
+    with conn:
+        insert_artifact(
+            conn,
+            _artifact(id="a-1", run_id="run-a", name="review.md", path="task-1/r1.md"),
+        )
+        insert_artifact(
+            conn,
+            _artifact(
+                id="a-2",
+                run_id="run-b",
+                name="review.md",
+                version=2,
+                path="task-1/r2.md",
+            ),
+        )
+    assert [a.id for a in list_artifacts_for_run(conn, "run-a")] == ["a-1"]
+    assert [a.id for a in list_artifacts_for_run(conn, "run-b")] == ["a-2"]
+
+
+def test_list_artifacts_for_run_is_empty_for_a_run_with_no_artifacts(conn):
+    _seed_task_with_two_runs(conn)
+    with conn:
+        insert_artifact(conn, _artifact(id="a-1", run_id="run-a", path="task-1/r1.md"))
+    assert list_artifacts_for_run(conn, "run-b") == []
+    assert list_artifacts_for_run(conn, "run-missing") == []
+
+
+def test_list_artifacts_for_run_orders_by_created_at_then_id(conn):
+    _seed_task_with_two_runs(conn)
+    with conn:
+        insert_artifact(
+            conn,
+            _artifact(
+                id="a-2",
+                run_id="run-a",
+                name="p.md",
+                version=2,
+                path="task-1/p2.md",
+                created_at=LATER,
+            ),
+        )
+        insert_artifact(
+            conn,
+            _artifact(
+                id="a-1b",
+                run_id="run-a",
+                name="q.md",
+                path="task-1/q1.md",
+                created_at=NOW,
+            ),
+        )
+        insert_artifact(
+            conn,
+            _artifact(
+                id="a-1a",
+                run_id="run-a",
+                name="r.md",
+                path="task-1/r1.md",
+                created_at=NOW,
+            ),
+        )
+    assert [a.id for a in list_artifacts_for_run(conn, "run-a")] == [
+        "a-1a",
+        "a-1b",
+        "a-2",
+    ]
 
 
 def test_database_rejects_a_cross_parent_artifact_written_by_raw_sql(conn):
