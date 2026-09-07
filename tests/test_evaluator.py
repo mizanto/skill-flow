@@ -8,7 +8,8 @@ Two kinds of test, following ``test_domain.py`` / ``test_workflow.py``:
   engine fails loudly.
 * **Behaviour tests** -- the four SF-A-4 §14 acceptance scenarios against the
   real ``workflows/software-change.yaml``, every rejection in the plan's §9, the
-  linkage ``ValueError``s, and determinism.
+  linkage ``ValueError``s, determinism, and initial resolution (SF-12): the
+  first step, the missing-Workflow refusal, and the anti-guessing rules.
 """
 
 import ast
@@ -20,6 +21,7 @@ import pytest
 
 from skillflow import evaluator
 from skillflow.domain import (
+    TRIGGER_REASON_INITIAL,
     HumanDecision,
     Outcome,
     Result,
@@ -33,7 +35,9 @@ from skillflow.evaluator import (
     EvaluationError,
     EvaluationInput,
     EvaluationOutput,
+    WorkflowSelectionRequiredError,
     evaluate,
+    resolve_initial_action,
 )
 from skillflow.workflow import ActionType, OutcomeRule, Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
@@ -132,7 +136,12 @@ def test_module_defines_exactly_the_v0_dataclasses():
 
 
 def test_all_matches_the_public_surface():
-    assert set(evaluator.__all__) == V0_DATACLASSES | {"EvaluationError", "evaluate"}
+    assert set(evaluator.__all__) == V0_DATACLASSES | {
+        "EvaluationError",
+        "WorkflowSelectionRequiredError",
+        "evaluate",
+        "resolve_initial_action",
+    }
 
 
 V0_FIELDS = {
@@ -548,3 +557,123 @@ def test_schema_still_forbids_a_decision_mapping_to_human():
             skill="sk",
             decisions={"loop_forever": OutcomeRule(action=ActionType.HUMAN)},
         )
+
+
+# --- initial resolution (SF-12) ----------------------------------------------
+
+
+def test_initial_resolution_targets_the_reference_workflows_first_step(workflow):
+    out = resolve_initial_action(_task(), workflow)
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("requirements", None)
+    assert out.reason == TRIGGER_REASON_INITIAL
+
+
+def test_initial_step_is_the_first_step_not_a_name_convention():
+    # Not alphabetical, and not the step that happens to be called
+    # "requirements": the initial step is steps[0] and nothing else.
+    wf = Workflow(
+        name="w",
+        steps=(
+            WorkflowStep(id="zeta", skill="sk"),
+            WorkflowStep(id="alpha", skill="sk"),
+            WorkflowStep(id="requirements", skill="sk"),
+        ),
+    )
+    out = resolve_initial_action(_task(workflow_definition_id="w"), wf)
+    assert out.step == "zeta"
+
+
+def test_initial_step_needs_no_outcome_rules():
+    # Outcome rules matter on exit, not on entry.
+    wf = Workflow(name="w", steps=(WorkflowStep(id="only", skill="sk"),))
+    out = resolve_initial_action(_task(workflow_definition_id="w"), wf)
+    assert (out.action, out.step) == (ActionType.RUN, "only")
+
+
+def test_missing_workflow_requires_explicit_selection(workflow):
+    with pytest.raises(WorkflowSelectionRequiredError) as exc:
+        resolve_initial_action(_task(workflow_definition_id=None), workflow)
+    msg = str(exc.value)
+    assert "task-1" in msg
+    assert "assign_workflow" in msg
+
+
+def test_workflow_selection_required_is_not_an_evaluation_error(workflow):
+    assert not issubclass(WorkflowSelectionRequiredError, (EvaluationError, ValueError))
+    # A caller handling "no v0 lifecycle rule" must not swallow "ask the user".
+    with pytest.raises(WorkflowSelectionRequiredError):
+        try:
+            resolve_initial_action(_task(workflow_definition_id=None), workflow)
+        except EvaluationError as exc:  # pragma: no cover - must not fire
+            pytest.fail(f"WorkflowSelectionRequiredError was caught as {exc!r}")
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        pytest.param(
+            Workflow(
+                name="software-change",
+                steps=(WorkflowStep(id="requirements", skill="sk"),),
+            ),
+            id="name-would-have-matched",
+        ),
+        pytest.param(
+            Workflow(name="unrelated", steps=(WorkflowStep(id="only", skill="sk"),)),
+            id="unrelated-definition",
+        ),
+    ],
+)
+def test_unassigned_task_is_not_resolved_even_when_a_workflow_is_supplied(supplied):
+    # The anti-guessing rule: possession of a Workflow object is not selection,
+    # whichever definition happens to be in hand -- including one whose name
+    # would have matched had the Task been assigned.
+    with pytest.raises(WorkflowSelectionRequiredError):
+        resolve_initial_action(_task(workflow_definition_id=None), supplied)
+
+
+def test_workflow_must_be_the_one_assigned_to_the_task(workflow):
+    with pytest.raises(ValueError) as exc:
+        resolve_initial_action(_task(workflow_definition_id="something-else"), workflow)
+    msg = str(exc.value)
+    assert "software-change" in msg
+    assert "something-else" in msg
+
+
+def test_assigned_id_is_matched_after_normalisation(workflow):
+    # Task and Workflow both strip at construction, so padding cannot split one
+    # identity into two.
+    out = resolve_initial_action(
+        _task(workflow_definition_id="  software-change  "), workflow
+    )
+    assert out.step == "requirements"
+
+
+@pytest.mark.parametrize("status", list(TaskStatus))
+def test_initial_resolution_ignores_task_status(workflow, status):
+    # Deliberate non-check: command preconditions are resolve-task's (SF-A-5
+    # §4.3), matching evaluate()'s stance.
+    out = resolve_initial_action(_task(status=status), workflow)
+    assert out.step == "requirements"
+
+
+def test_initial_resolution_is_deterministic(workflow):
+    task = _task()
+    assert resolve_initial_action(task, workflow) == resolve_initial_action(
+        task, workflow
+    )
+
+
+@pytest.mark.parametrize(
+    "argument,message",
+    [
+        ("task", "task must be a Task"),
+        ("workflow", "workflow must be a Workflow"),
+    ],
+)
+def test_initial_resolution_rejects_wrong_argument_types(workflow, argument, message):
+    args = {"task": _task(), "workflow": workflow}
+    args[argument] = f"not-a-{argument}"
+    with pytest.raises(ValueError, match=message):
+        resolve_initial_action(args["task"], args["workflow"])

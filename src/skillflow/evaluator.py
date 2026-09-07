@@ -1,10 +1,20 @@
-"""Skill Flow deterministic Lifecycle Evaluation (SF-11).
+"""Skill Flow deterministic Lifecycle Evaluation (SF-11, SF-12).
 
 The operation the MVP turns on: *given the current lifecycle state and what a
-Run reported, what should happen next?* (SF-A-4 §1). This module is a single
-pure function -- :func:`evaluate` -- over two frozen value objects. It maps the
-current step's declared outcome/decision rules (SF-A-4 §7) onto one v0 lifecycle
-action, and mutates nothing.
+Run reported, what should happen next?* (SF-A-4 §1). This module is two pure
+functions over frozen value objects. Each returns one v0 lifecycle action and
+mutates nothing:
+
+* :func:`evaluate` answers *a Run finished, what now?*, mapping the current
+  step's declared outcome/decision rules (SF-A-4 §7) onto an action.
+* :func:`resolve_initial_action` answers *a Task exists and nothing has run yet,
+  what first?* (SF-A-5 §4.5) -- the one case :func:`evaluate` cannot, because
+  there is no previous Run, no Result, and so no outcome rule to look up. It
+  *requires* the Task's assigned ``Workflow`` and never chooses one: an
+  unassigned Task raises :class:`WorkflowSelectionRequiredError` so the caller
+  asks the user. Workflow selection stays separate from Lifecycle Evaluation
+  (SF-A-5 §4.4), and persisting a selection remains
+  ``service.assign_workflow``'s job.
 
 Three boundaries, mirroring :mod:`skillflow.domain` and :mod:`skillflow.workflow`:
 
@@ -12,31 +22,41 @@ Three boundaries, mirroring :mod:`skillflow.domain` and :mod:`skillflow.workflow
   ``from_row``. The caller fetches the ``Task`` / ``Run`` / ``Result`` /
   ``HumanDecision`` (``store.get_result_for_run`` etc.) and hands them in.
 * **No I/O.** No filesystem, no clock, no randomness. Every input is an explicit
-  field; the output is a function of those fields alone, so calling
-  :func:`evaluate` twice on equal input yields equal output.
+  field; the output is a function of those fields alone, so calling either
+  function twice on equal input yields equal output.
 * **Not an agent.** Nothing here launches Claude Code, creates a session, or
-  creates the next Run. :func:`evaluate` returns an *action*; turning that into a
+  creates the next Run. Both functions return an *action*; turning that into a
   concrete Run (resolving skill / model / effort / context) is ``resolve-task``
   (SF-A-5 §4.6), and applying the Task-status consequence is the calling command
   (SF-A-5 §6.9 / §7.7).
 
 It is deliberately **not** a workflow engine: one dict lookup keyed by a
-decision string. No graph traversal, no history replay, no implicit "next step
-in the list", no state machine, no conditions or expressions.
+decision string, and an initial step that is literally ``steps[0]``. No graph
+traversal, no history replay, no implicit "next step in the list", no entry
+condition or "start" marker, no state machine, no expressions.
 
-Two documented deviations from SF-A-4's conceptual sketch:
+Three documented deviations from SF-A-4's conceptual sketch:
 
 * **Flat :class:`EvaluationOutput`.** SF-A-4 §5 nests ``action.{type, step,
   skill, reason}``. A one-field wrapper dataclass buys nothing in v0 (AGENTS.md
   principle 6), so the fields sit directly on the output.
-* **``task.workflow_definition_id == workflow.name`` is not checked.** That the
-  persisted definition id *is* the ``Workflow.name`` is a service-layer
-  convention (:mod:`skillflow.service`); the evaluator interprets the loaded
-  ``Workflow`` it is handed and does not re-derive identity. ``task.status`` is
-  likewise not checked -- command preconditions (``resolve-task`` rejects a
-  terminal Task, ``decide`` requires ``waiting_for_human``) belong to the
-  commands (SF-A-5 §4.3 / §7.4); duplicating them here would create two places
-  that can disagree.
+* **``task.workflow_definition_id == workflow.name`` is not checked by
+  :func:`evaluate`.** That the persisted definition id *is* the
+  ``Workflow.name`` is a service-layer convention (:mod:`skillflow.service`);
+  :func:`evaluate` interprets the loaded ``Workflow`` it is handed and does not
+  re-derive identity. :func:`resolve_initial_action` does check it, for a
+  different reason: there the Workflow *is* the choice being applied, so
+  accepting one the Task never selected would be the guess SF-12 forbids.
+  ``task.status`` is checked by neither -- command preconditions
+  (``resolve-task`` rejects a terminal Task, ``decide`` requires
+  ``waiting_for_human``) belong to the commands (SF-A-5 §4.3 / §7.4);
+  duplicating them here would create two places that can disagree.
+* **Initial resolution lives here.** SF-A-4 scopes this module to
+  outcome-to-action evaluation, and SF-A-5 §4.5 does not say where the first
+  step is resolved. Both operations are the same kind of thing -- a pure,
+  deterministic map from current lifecycle state onto one
+  :class:`EvaluationOutput` -- so a second module would import this one and add
+  ~40 lines of packaging for nothing (AGENTS.md principle 1).
 
 A ``human`` decision that itself maps to ``human`` is unreachable rather than
 re-checked here: :class:`skillflow.workflow.WorkflowStep` rejects a ``decisions``
@@ -45,10 +65,24 @@ rule with ``action: human`` at construction (SF-A-5 §7.7).
 
 from dataclasses import dataclass
 
-from skillflow.domain import HumanDecision, Result, ResultStatus, Run, Task
+from skillflow.domain import (
+    TRIGGER_REASON_INITIAL,
+    HumanDecision,
+    Result,
+    ResultStatus,
+    Run,
+    Task,
+)
 from skillflow.workflow import ActionType, Workflow
 
-__all__ = ["EvaluationError", "EvaluationInput", "EvaluationOutput", "evaluate"]
+__all__ = [
+    "EvaluationError",
+    "EvaluationInput",
+    "EvaluationOutput",
+    "WorkflowSelectionRequiredError",
+    "evaluate",
+    "resolve_initial_action",
+]
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -72,6 +106,20 @@ class EvaluationError(Exception):
     Deliberately not a ``ValueError`` subclass -- a ``ValueError`` from this
     module is a caller/programming error (bad types, mismatched ids), an
     ``EvaluationError`` is a lifecycle state with no v0 rule.
+    """
+
+
+class WorkflowSelectionRequiredError(Exception):
+    """Initial resolution was asked for a Task with no Workflow Definition.
+
+    SkillFlow never selects a Workflow: the user does, and
+    ``service.assign_workflow`` records the choice (SF-A-5 §4.4). This is the
+    signal ``resolve-task`` reacts to by prompting.
+
+    Deliberately **not** an :class:`EvaluationError` subclass (nor a
+    ``ValueError``): a caller writing ``except EvaluationError`` is handling
+    "this lifecycle state has no v0 rule" and must not swallow "ask the user
+    which Workflow this Task follows". Flat, like ``EvaluationError`` itself.
     """
 
 
@@ -142,9 +190,9 @@ class EvaluationOutput:
     ``reason`` is the outcome-decision or Human-Decision string that selected the
     rule (``"approved"``, ``"changes_requested"``, ``"request_changes"``); it is
     what SF-A-5 §4.7 stores as the next Run's ``trigger_reason`` and is required
-    because an evaluated action always has a cause (the only reasonless
-    ``trigger_reason`` is ``TRIGGER_REASON_INITIAL``, which initial resolution
-    -- SF-12 -- produces, never the evaluator).
+    because an action always has a cause. The one cause that is not an outcome
+    or a decision is ``TRIGGER_REASON_INITIAL``, produced by
+    :func:`resolve_initial_action` -- never by :func:`evaluate`.
 
     ``__post_init__`` repeats ``OutcomeRule``'s target invariant: ``run`` carries
     exactly one of ``step`` / ``skill``; ``human`` / ``complete`` / ``cancel``
@@ -255,4 +303,61 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
 
     return EvaluationOutput(
         action=rule.action, reason=key, step=rule.step, skill=rule.skill
+    )
+
+
+def resolve_initial_action(task: Task, workflow: Workflow) -> EvaluationOutput:
+    """Return the first lifecycle action for ``task`` (SF-A-5 §4.5, SF-12).
+
+    The Task has no lifecycle history yet, so there is no outcome to map: the
+    action is always ``run`` targeting the assigned Workflow's normal starting
+    step, with ``reason`` ``"initial"`` -- the ``trigger_reason`` SF-A-5 §4.7
+    gives an initial Run.
+
+    The rule order below is the contract: it fixes error precedence.
+
+    1. ``task`` is a ``Task`` and ``workflow`` is a ``Workflow``, else
+       ``ValueError`` (the convention of ``EvaluationInput.__post_init__``).
+    2. The Task has no ``workflow_definition_id`` ->
+       :class:`WorkflowSelectionRequiredError`. SkillFlow never picks one, and
+       being handed a ``Workflow`` object is not the user having selected it.
+    3. ``workflow`` is not the definition the Task is bound to -> ``ValueError``
+       naming both ids. Resolving against an unselected Workflow is the guess
+       SF-12 forbids. The v0 identity rule is ``WorkflowDefinition.id ==
+       Workflow.name`` (:mod:`skillflow.service`); both sides are stripped at
+       construction, and the comparison is exact -- ids are identifiers, not
+       display text.
+    4. Return ``run`` targeting ``workflow.initial_step`` (``steps[0]``), never
+       a step inferred from the Task, its title, or a naming convention.
+
+    Two deliberate non-checks:
+
+    * **Task status.** ``active`` / ``waiting_for_human`` / ``completed`` /
+      ``cancelled`` all resolve identically here; command preconditions are
+      ``resolve-task``'s (SF-A-5 §4.3), exactly as for :func:`evaluate`.
+    * **Previous Runs.** This module has no persistence access. Choosing between
+      initial resolution and :func:`evaluate` -- i.e. deciding that a Task has
+      no history -- is ``resolve-task``'s job (SF-A-5 §4.5 / §4.6).
+    """
+    if not isinstance(task, Task):
+        raise ValueError("resolve_initial_action() task must be a Task")
+    if not isinstance(workflow, Workflow):
+        raise ValueError("resolve_initial_action() workflow must be a Workflow")
+
+    if task.workflow_definition_id is None:
+        raise WorkflowSelectionRequiredError(
+            f"task {task.id!r} has no Workflow Definition; SkillFlow never "
+            "selects one -- have the user choose a Workflow and record it with "
+            "service.assign_workflow() before resolving the initial step"
+        )
+    if workflow.name != task.workflow_definition_id:
+        raise ValueError(
+            f"workflow {workflow.name!r} is not the Workflow assigned to task "
+            f"{task.id!r} ({task.workflow_definition_id!r})"
+        )
+
+    return EvaluationOutput(
+        action=ActionType.RUN,
+        step=workflow.initial_step.id,
+        reason=TRIGGER_REASON_INITIAL,
     )
