@@ -10,11 +10,13 @@ Four boundaries are held deliberately:
 
 1. **Translation, plus four persistence invariants.** Rows in, entities out.
    This module does not generate ids, read a clock, default a timestamp, or
-   read/write Artifact content on the filesystem (SF-15). It *does* enforce the
-   four cross-entity invariants the domain layer cannot (SF-5): one running Run
-   per Task, one canonical Result per Run, legal Run status transitions (a Run
-   is never resumed; a terminal Run is final), and cross-parent consistency (a
-   row's ``run_id`` must belong to its ``task_id``). Each invariant SQLite can
+   read/write Artifact content on the filesystem -- that boundary belongs to
+   :mod:`skillflow.artifacts` (SF-15), the only module that writes both stores.
+   It *does* enforce the four cross-entity invariants the domain layer cannot
+   (SF-5): one running Run per Task, one canonical Result per Run, legal Run
+   status transitions (a Run is never resumed; a terminal Run is final), and
+   cross-parent consistency (a row's ``run_id`` must belong to its
+   ``task_id``). Each invariant SQLite can
    express is a DDL constraint -- the guarantee, atomic and unbypassable --
    backed by a Python pre-check that raises :class:`InvariantViolationError`
    naming the conflicting ids -- the actionable message. Still deliberately
@@ -28,7 +30,9 @@ Four boundaries are held deliberately:
 3. **Deterministic reads.** Every relationship query that can return more than
    one row carries an explicit ``ORDER BY created_at, id``.
    :func:`get_result_for_run` is the exception -- ``results.run_id`` is
-   ``UNIQUE``, so it can only ever match one row.
+   ``UNIQUE``, so it can only ever match one row. :func:`latest_artifact`
+   orders by ``version DESC`` instead; ``artifacts UNIQUE (task_id, name,
+   version)`` makes that ordering total, so no tie-break column is needed.
 4. **Current state is directly queryable** (SF-A-2 §1, §10.1). ``tasks.status`` /
    ``runs.status`` are read straight from their rows. ``lifecycle_events`` is an
    append-only history and is never replayed to reconstruct state.
@@ -94,6 +98,7 @@ __all__ = [
     "get_artifact",
     "get_workflow_definition",
     "get_result_for_run",
+    "latest_artifact",
     "list_runs_for_task",
     "list_artifacts_for_task",
     "list_human_decisions_for_task",
@@ -153,6 +158,10 @@ _LEGAL_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
 # Run status transitions are not a constraint here: SQLite can only express them
 # with a trigger (a second rule language), and the rule guards developer error
 # rather than a race. They are a Python pre-check in update_run only.
+#
+# SF-15 adds one further constraint, artifacts UNIQUE (task_id, name, version):
+# one row per logical version, so a new version is a new row and an old version
+# is never rewritten.
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_definitions (
     id   TEXT PRIMARY KEY NOT NULL,
@@ -215,7 +224,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     path          TEXT NOT NULL,
     supersedes_id TEXT REFERENCES artifacts(id),
     created_at    TEXT NOT NULL,
-    FOREIGN KEY (task_id, run_id) REFERENCES runs(task_id, id)
+    FOREIGN KEY (task_id, run_id) REFERENCES runs(task_id, id),
+    -- SF-15: one row per logical version. New content is a new version; an
+    -- old version is never rewritten. The Python pre-check in
+    -- artifacts.create_artifact computes the next version and gives the
+    -- actionable message; this is the unbypassable guarantee and closes the
+    -- two-session check-then-insert race.
+    UNIQUE (task_id, name, version)
 );
 
 -- Composite foreign key (SF-5): run_id must belong to task_id, as on artifacts.
@@ -743,6 +758,25 @@ def get_result_for_run(conn: sqlite3.Connection, run_id: str) -> Result | None:
         (run_id,),
     ).fetchone()
     return _to_result(row) if row is not None else None
+
+
+def latest_artifact(
+    conn: sqlite3.Connection, task_id: str, name: str
+) -> Artifact | None:
+    """Return the highest-version Artifact named ``name`` in ``task_id``.
+
+    ``None`` if the Task has no Artifact under that name. The version chain is
+    keyed by ``(task_id, name)`` and spans Runs (SF-A-1 §7: ``plan.md`` v1 ->
+    v2 -> v3 is a Task-level progression). ``UNIQUE (task_id, name, version)``
+    makes ``ORDER BY version DESC`` total, so no tie-break is needed -- the
+    same reasoning :func:`get_result_for_run` documents.
+    """
+    row = conn.execute(
+        "SELECT * FROM artifacts WHERE task_id = ? AND name = ? "
+        "ORDER BY version DESC LIMIT 1",
+        (task_id, name),
+    ).fetchone()
+    return _to_artifact(row) if row is not None else None
 
 
 def list_runs_for_task(conn: sqlite3.Connection, task_id: str) -> list[Run]:

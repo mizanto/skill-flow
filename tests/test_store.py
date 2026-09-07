@@ -50,6 +50,7 @@ from skillflow.store import (
     insert_run,
     insert_task,
     insert_workflow_definition,
+    latest_artifact,
     list_artifacts_for_task,
     list_human_decisions_for_task,
     list_lifecycle_events_for_task,
@@ -200,6 +201,7 @@ def test_public_surface():
         "get_artifact",
         "get_workflow_definition",
         "get_result_for_run",
+        "latest_artifact",
         "list_runs_for_task",
         "list_artifacts_for_task",
         "list_human_decisions_for_task",
@@ -265,18 +267,37 @@ def test_store_module_imports_are_stdlib_plus_two_skillflow_modules():
     }
 
 
-def test_schema_version_is_three():
+def test_schema_version_is_four():
     from skillflow import workspace
 
-    assert workspace.SCHEMA_VERSION == 3
+    # SF-15 bumped 3 -> 4 for artifacts UNIQUE (task_id, name, version).
+    assert workspace.SCHEMA_VERSION == 4
 
 
 def test_insert_artifact_writes_no_file(ws, conn):
-    # SF-4 persists Artifact metadata only; content is SF-15's.
+    # SF-4 persists Artifact metadata only; content is skillflow.artifacts'.
+    # This is the line separating store from artifacts, and it stays true.
     _seed_task_run(conn)
     with conn:
         insert_artifact(conn, _artifact())
     assert list(ws.artifacts_dir.iterdir()) == []
+
+
+def test_artifact_version_is_unique_per_task_and_name(conn):
+    # SF-15 DDL backstop: the unbypassable half of "a new version is a new
+    # row". artifacts.create_artifact's pre-check gives the actionable
+    # message; this closes the two-session check-then-insert race.
+    _seed_task_run(conn)
+    with conn:
+        insert_artifact(conn, _artifact(id="artifact-1"))
+    with pytest.raises(sqlite3.IntegrityError), conn:
+        insert_artifact(conn, _artifact(id="artifact-2"))
+
+
+def test_store_has_no_update_artifact():
+    # Artifacts are immutable: a new version is a new row, never an edit.
+    assert not hasattr(store, "update_artifact")
+    assert "update_artifact" not in store.__all__
 
 
 # --- round-trips: minimal (all optionals None) and maximal -------------------
@@ -1244,6 +1265,52 @@ def test_lifecycle_event_naming_a_run_from_another_task_is_rejected(conn):
                     type=LifecycleEventType.RUN_COMPLETED,
                 ),
             )
+
+
+def test_latest_artifact_returns_none_when_the_task_has_no_such_name(conn):
+    _seed_task_run(conn)
+    with conn:
+        insert_artifact(conn, _artifact(id="a-1", name="plan.md"))
+    assert latest_artifact(conn, "task-1", "review.md") is None
+    assert latest_artifact(conn, "task-missing", "plan.md") is None
+
+
+def test_latest_artifact_returns_the_highest_version_regardless_of_insert_order(conn):
+    # ORDER BY version DESC is total because of UNIQUE (task_id, name, version),
+    # so insertion order and created_at cannot change the answer.
+    _seed_task_run(conn)
+    with conn:
+        insert_artifact(conn, _artifact(id="a-2", name="plan.md", version=2))
+        insert_artifact(
+            conn, _artifact(id="a-1", name="plan.md", version=1, created_at=NOW)
+        )
+    assert latest_artifact(conn, "task-1", "plan.md").id == "a-2"
+
+
+def test_latest_artifact_scopes_by_task_and_name(conn):
+    _seed_two_tasks_each_with_a_run(conn)
+    with conn:
+        insert_artifact(
+            conn,
+            _artifact(id="a-1", task_id="task-1", run_id="run-1", name="plan.md"),
+        )
+        insert_artifact(
+            conn,
+            _artifact(
+                id="a-2",
+                task_id="task-2",
+                run_id="run-2",
+                name="plan.md",
+                version=7,
+            ),
+        )
+        insert_artifact(
+            conn,
+            _artifact(id="a-3", task_id="task-1", run_id="run-1", name="review.md"),
+        )
+    assert latest_artifact(conn, "task-1", "plan.md").id == "a-1"
+    assert latest_artifact(conn, "task-1", "review.md").id == "a-3"
+    assert latest_artifact(conn, "task-2", "plan.md").id == "a-2"
 
 
 def test_list_artifacts_for_task_cannot_return_a_run_from_another_task(conn):
