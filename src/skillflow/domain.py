@@ -91,14 +91,21 @@ class ResultStatus(StrEnum):
 
 
 class LifecycleEventType(StrEnum):
-    """Audit event types, verbatim from Persistence v0 (SF-A-2 §8).
+    """Audit event types, from Persistence v0 (SF-A-2 §8).
 
     Lifecycle events are history/debug data, not event sourcing: current state
     is queryable without replaying them (SF-A-2 §8).
+
+    SF-A-2 §8 introduces its list with "Examples:", so it is an open set. The
+    first ten members mirror that list verbatim. ``TASK_WORKFLOW_ASSIGNED`` is
+    the one extension so far: it is emitted by ``service.assign_workflow`` when a
+    Task acquires a Workflow after creation, so that binding leaves a trace in
+    history (SF-A-2 §8: "understanding why a Run was created").
     """
 
     TASK_CREATED = "task.created"
     TASK_STATUS_CHANGED = "task.status_changed"
+    TASK_WORKFLOW_ASSIGNED = "task.workflow_assigned"
     RUN_CREATED = "run.created"
     RUN_STARTED = "run.started"
     RUN_COMPLETED = "run.completed"

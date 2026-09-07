@@ -149,6 +149,7 @@ def test_lifecycle_event_type_values_match_spec():
     assert {e.value for e in LifecycleEventType} == {
         "task.created",
         "task.status_changed",
+        "task.workflow_assigned",
         "run.created",
         "run.started",
         "run.completed",

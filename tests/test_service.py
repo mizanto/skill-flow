@@ -3,23 +3,37 @@
 Two kinds of test, matching ``test_store.py`` / ``test_workspace.py``:
 
 * **Contract change-detectors** -- the public surface, the import boundary (the
-  service reads no definition files), and the ``UnknownWorkflowError`` type.
+  service reads no definition files), and the ``UnknownWorkflowError`` /
+  ``WorkflowAssignmentError`` types.
 * **Behaviour tests** -- Task creation (status, ids, timestamps, round-trip,
   durability, the ``task.created`` event, workflow-reference validation and
-  atomicity), ``register_workflow`` idempotence and commit, and the SF-8 -> SF-9
+  atomicity), ``register_workflow`` idempotence and commit, ``assign_workflow``
+  (persistence, immutable-field preservation, durability, the
+  ``task.workflow_assigned`` event, ``waiting_for_human`` acceptance,
+  idempotent no-op / normalisation, every rejection path proving no write,
+  error precedence, and transaction atomicity), and the SF-8 -> SF-9
   integration path through the real reference definition.
 """
 
 import ast
 import contextlib
+import inspect
 import sqlite3
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from skillflow import service, store, workspace
 from skillflow.domain import LifecycleEventType, TaskStatus
-from skillflow.service import UnknownWorkflowError, create_task, register_workflow
+from skillflow.service import (
+    UnknownWorkflowError,
+    WorkflowAssignmentError,
+    assign_workflow,
+    create_task,
+    register_workflow,
+)
 from skillflow.workflow import Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
@@ -52,8 +66,10 @@ def _rows(conn, table):
 def test_public_surface():
     assert set(service.__all__) == {
         "UnknownWorkflowError",
+        "WorkflowAssignmentError",
         "register_workflow",
         "create_task",
+        "assign_workflow",
     }
 
 
@@ -75,6 +91,20 @@ def test_service_module_reads_no_definition_files():
 def test_unknown_workflow_error_is_a_distinct_type():
     assert not issubclass(UnknownWorkflowError, ValueError)
     assert not issubclass(UnknownWorkflowError, sqlite3.Error)
+
+
+def test_workflow_assignment_error_is_a_distinct_type():
+    assert not issubclass(WorkflowAssignmentError, ValueError)
+    assert not issubclass(WorkflowAssignmentError, sqlite3.Error)
+
+
+def test_assign_workflow_never_infers_a_definition():
+    # workflow_definition_id is keyword-only with no default: the caller must
+    # name the Workflow, so nothing here can select one.
+    sig = inspect.signature(assign_workflow)
+    param = sig.parameters["workflow_definition_id"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 # --- create_task: shape -------------------------------------------------
@@ -230,3 +260,235 @@ def test_reference_workflow_can_be_registered_and_referenced(conn):
     assert store.get_task(conn, task.id).workflow_definition_id == "software-change"
     (event,) = store.list_lifecycle_events_for_task(conn, task.id)
     assert event.type is LifecycleEventType.TASK_CREATED
+
+
+# --- assign_workflow ------------------------------------------------
+
+
+def _force_status(conn, task, status):
+    """Move a Task to ``status`` directly (``update_task`` does no validation)."""
+    changed = replace(
+        task, status=status, updated_at=task.updated_at + timedelta(seconds=1)
+    )
+    with conn:
+        store.update_task(conn, changed)
+    return store.get_task(conn, task.id)
+
+
+def test_assign_workflow_is_not_inferred_even_with_one_definition(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Unbound")
+    assert task.workflow_definition_id is None
+    assert store.get_task(conn, task.id).workflow_definition_id is None
+
+
+def test_assign_workflow_persists(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Unbound")
+
+    updated = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    assert updated.workflow_definition_id == "demo"
+    stored = store.get_task(conn, task.id)
+    assert stored == updated
+    assert stored.workflow_definition_id == "demo"
+
+
+def test_assign_workflow_preserves_immutable_fields(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Keep me", description="body")
+
+    updated = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    assert (updated.id, updated.title, updated.description, updated.status) == (
+        task.id,
+        task.title,
+        task.description,
+        task.status,
+    )
+    assert updated.created_at == task.created_at
+    assert updated.updated_at > task.created_at
+
+
+def test_assign_workflow_survives_reopening_the_store(conn, ws):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Durable")
+    assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    with contextlib.closing(store.open_store(ws)) as reopened:
+        assert store.get_task(reopened, task.id).workflow_definition_id == "demo"
+
+
+def test_assign_workflow_writes_exactly_one_assignment_event(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Eventful")
+
+    updated = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    events = store.list_lifecycle_events_for_task(conn, task.id)
+    assert [e.type for e in events] == [
+        LifecycleEventType.TASK_CREATED,
+        LifecycleEventType.TASK_WORKFLOW_ASSIGNED,
+    ]
+    assigned = events[-1]
+    assert assigned.run_id is None
+    assert dict(assigned.payload) == {"workflow_definition_id": "demo"}
+    assert assigned.created_at == updated.updated_at
+
+
+def test_assign_workflow_accepts_a_waiting_for_human_task(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Waiting")
+    task = _force_status(conn, task, TaskStatus.WAITING_FOR_HUMAN)
+
+    updated = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    assert updated.workflow_definition_id == "demo"
+    assert updated.status is TaskStatus.WAITING_FOR_HUMAN
+
+
+def test_assign_workflow_integration_with_reference_definition(conn):
+    register_workflow(conn, load_workflow(REFERENCE))
+    task = create_task(conn, title="Ship it")
+
+    assign_workflow(conn, task_id=task.id, workflow_definition_id="software-change")
+
+    assert store.get_task(conn, task.id).workflow_definition_id == "software-change"
+
+
+# assign_workflow: idempotence / normalisation
+
+
+def test_assign_workflow_same_definition_twice_is_a_no_op(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Retry")
+    first = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    second = assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    assert second == first
+    assert second.updated_at == first.updated_at
+    events = store.list_lifecycle_events_for_task(conn, task.id)
+    assert [e.type for e in events] == [
+        LifecycleEventType.TASK_CREATED,
+        LifecycleEventType.TASK_WORKFLOW_ASSIGNED,
+    ]
+
+
+def test_assign_workflow_strips_whitespace_then_treats_it_as_the_no_op(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Whitespace")
+
+    assigned = assign_workflow(conn, task_id=task.id, workflow_definition_id=" demo ")
+    assert assigned.workflow_definition_id == "demo"
+    assert store.get_task(conn, task.id).workflow_definition_id == "demo"
+
+    again = assign_workflow(conn, task_id=task.id, workflow_definition_id=" demo ")
+    assert again.updated_at == assigned.updated_at
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == 2
+
+
+# assign_workflow: invalid cases -- each writes nothing
+
+
+def _assert_task_and_events_unchanged(conn, task_id, snapshot_task, event_count):
+    assert store.get_task(conn, task_id) == snapshot_task
+    assert len(store.list_lifecycle_events_for_task(conn, task_id)) == event_count
+
+
+def test_assign_workflow_missing_task_raises_lookup_error(conn):
+    register_workflow(conn, _workflow("demo"))
+    with pytest.raises(LookupError, match="no task"):
+        assign_workflow(conn, task_id="task-missing", workflow_definition_id="demo")
+
+
+def test_assign_workflow_unregistered_definition_raises_and_writes_nothing(conn):
+    task = create_task(conn, title="Doomed")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(UnknownWorkflowError, match="nope"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="nope")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_rejects_reassignment_to_a_different_definition(conn):
+    register_workflow(conn, _workflow("demo"))
+    register_workflow(conn, _workflow("other"))
+    task = create_task(conn, title="Bound", workflow_definition_id="demo")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(WorkflowAssignmentError, match="already assigned"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="other")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_rejects_a_completed_task(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Done")
+    task = _force_status(conn, task, TaskStatus.COMPLETED)
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(WorkflowAssignmentError, match="completed"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_rejects_a_cancelled_task(conn):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Gone")
+    task = _force_status(conn, task, TaskStatus.CANCELLED)
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(WorkflowAssignmentError, match="cancelled"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_empty_id_is_a_domain_value_error(conn):
+    task = create_task(conn, title="Empty")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(ValueError, match="workflow_definition_id"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_none_id_is_a_value_error(conn):
+    task = create_task(conn, title="None")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(ValueError, match="does not unassign"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id=None)
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_terminal_task_precedes_unregistered_definition(conn):
+    task = create_task(conn, title="Precedence")
+    task = _force_status(conn, task, TaskStatus.COMPLETED)
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(WorkflowAssignmentError):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="nope")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_assign_workflow_and_event_are_one_transaction(conn, monkeypatch):
+    register_workflow(conn, _workflow("demo"))
+    task = create_task(conn, title="Half-written")
+    before = store.get_task(conn, task.id)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("event write failed")
+
+    monkeypatch.setattr(service.store, "insert_lifecycle_event", boom)
+    with pytest.raises(RuntimeError, match="event write failed"):
+        assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
