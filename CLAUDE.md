@@ -8,6 +8,13 @@ Claude Code performs the actual work. Skill Flow owns durable lifecycle state, a
 
 Keep the implementation small and explicit.
 
+## Working environment
+
+Do not create or use git worktrees. Do not call `EnterWorktree`, and do not run
+`git worktree add`. Work in the main checkout, on the currently checked-out
+branch. If a session is launched inside `.claude/worktrees/`, report that and
+stop rather than proceeding there.
+
 ## Source of truth
 
 Before non-trivial changes, read the relevant specifications. They live in the
