@@ -10,14 +10,21 @@ Keep the implementation small and explicit.
 
 ## Source of truth
 
-Before non-trivial changes, read the relevant specification files if present:
+Before non-trivial changes, read the relevant specifications. They live in the
+YouTrack knowledge base (project `SF`), not in this repository:
 
-- `skillflow-domain-model-v0.md`
-- `skillflow-persistence-v0.md`
-- `skillflow-execution-boundary-v0.md`
-- `skillflow-lifecycle-evaluation-v0.md`
-- `skillflow-command-contract-v0.md`
-- `skillflow-implementation-plan-v0.md`
+| Article | Title | Covers |
+|---|---|---|
+| [SF-A-1](https://bendak.youtrack.cloud/articles/SF-A-1) | Domain Model v0 | Task, Run, Result, Artifact, Workflow Definition, Human Decision |
+| [SF-A-2](https://bendak.youtrack.cloud/articles/SF-A-2) | Persistence v0 | SQLite tables, `.skillflow/` workspace, filesystem/DB boundary |
+| [SF-A-3](https://bendak.youtrack.cloud/articles/SF-A-3) | Execution Boundary v0 | Claude Code as execution layer, Run session model |
+| [SF-A-4](https://bendak.youtrack.cloud/articles/SF-A-4) | Lifecycle Evaluation v0 | Deterministic outcome-to-action rules, acceptance scenarios |
+| [SF-A-5](https://bendak.youtrack.cloud/articles/SF-A-5) | Command Contract v0 | `resolve-task`, `prepare-artifacts`, `complete-run`, `decide` |
+| [SF-A-6](https://bendak.youtrack.cloud/articles/SF-A-6) | Implementation Plan v0 | `SF-NNN` plan references and their wave ordering |
+
+`SF-NNN` identifiers in plans and commit messages are planning references from
+SF-A-6; the actual work items are YouTrack issues (`SF-1`, `SF-2`, …), which map
+to the plan references but are numbered independently.
 
 If specifications contradict each other, do not silently reinterpret the architecture. Report the contradiction.
 

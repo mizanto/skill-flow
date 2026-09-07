@@ -373,9 +373,11 @@ class WorkflowDefinition:
     """The normal procedure for a type of Task -- identity only in v0.
 
     Steps, skills, models, effort, expected outputs and outcome-to-action rules
-    are SF-7's deliverable ("Define Workflow Definition schema"). Adding them
-    here would preempt that issue and drift toward a generic workflow DSL.
-    A Workflow Definition is a definition, never a runtime instance.
+    are SF-6's deliverable -- the loaded procedure lives in
+    :mod:`skillflow.workflow` (``Workflow`` / ``WorkflowStep``), kept out of the
+    persisted model on purpose. Adding them here would drift toward a generic
+    workflow DSL. A Workflow Definition is a definition, never a runtime
+    instance.
     """
 
     id: str
