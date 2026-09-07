@@ -21,8 +21,9 @@ No validation rule from :mod:`skillflow.workflow` is re-implemented here.
 
 Three boundaries:
 
-* **No discovery.** ``load_workflow(path)`` reads the path it is given. Where
-  definition files live is SF-9 / SF-11's decision, so this module imports
+* **No discovery.** ``load_workflow(path)`` reads the path it is given. The
+  reference definition lives at ``workflows/software-change.yaml``; how a target
+  repository selects one is SF-11's decision, so this module imports
   neither :mod:`skillflow.store` nor :mod:`skillflow.workspace` and writes
   nothing to ``.skillflow/``.
 * **No persistence.** A loaded ``Workflow`` is configuration, not a runtime

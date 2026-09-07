@@ -1,0 +1,65 @@
+# The reference SkillFlow Workflow Definition (SF-8).
+#
+# Requirements -> Decomposition -> Implementation -> Review, with the outcome
+# branches of SF-A-4 §14. Every deviation from the normal sequence is an
+# outcome-to-action rule: there is no Loop, Rework, Iteration, Router, or
+# Transition concept, and none is needed.
+#
+# Loaded with skillflow.workflow_loader.load_workflow; the schema and every
+# validation rule are documented in docs/workflow-schema.md.
+name: software-change
+
+steps:
+  # The normal starting step (Workflow.initial_step is steps[0]).
+  - id: requirements
+    skill: requirements-analysis
+    model: opus
+    effort: high
+    outputs:
+      - type: requirements
+        required: true
+    outcomes:
+      ready: { action: run, step: decomposition }        # A: happy path
+
+  - id: decomposition
+    skill: decomposition
+    model: opus
+    effort: high
+    outputs:
+      - type: plan
+        required: true
+    outcomes:
+      ready: { action: run, step: implementation }       # A
+
+  # Declares no expected outputs: the durable outputs of a change are the
+  # repository's own files, and SF-A-6 §2 gives this step none.
+  - id: implementation
+    skill: implementation
+    model: sonnet
+    effort: high
+    outcomes:
+      ready: { action: run, step: review }               # A
+
+  - id: review
+    skill: code-review
+    model: opus
+    effort: high
+    outputs:
+      - type: review
+        required: true
+    outcomes:
+      # A: happy path terminates here.
+      approved:                     { action: complete }
+      # B: review / rework -- an ordinary rule targeting an earlier step.
+      changes_requested:            { action: run, step: implementation }
+      # C: SF-A-4 §9 -- a skill target, deliberately not a step in this
+      # workflow, and never validated against the step list.
+      fundamental_assumption_wrong: { action: run, skill: research }
+      # D: hand the Task to /skillflow:decide (Task -> waiting_for_human).
+      human_required:               { action: human }
+    # D: the decisions /skillflow:decide accepts for this step. A decision
+    # never maps back to 'human' (SF-A-5 §7.7).
+    decisions:
+      approve:         { action: complete }
+      request_changes: { action: run, step: implementation }
+      cancel:          { action: cancel }

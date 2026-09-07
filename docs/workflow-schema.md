@@ -16,8 +16,9 @@ Command Contract v0 (SF-A-5 §4.8, §6.5, §7), Implementation Plan v0 (SF-A-6 �
 - **Loaded separately.** `skillflow/workflow.py` is stdlib-only and performs no
   IO; reading a definition file into these objects is
   [`skillflow/workflow_loader.py`](../src/skillflow/workflow_loader.py), covered
-  in [Loading](#loading) below. The reference `software-change` definition file
-  is still a separate deliverable (SF-009).
+  in [Loading](#loading) below. The reference `software-change` definition now
+  ships at [`workflows/software-change.yaml`](../workflows/software-change.yaml)
+  (SF-8).
 - **Not a runtime instance.** Only immutable value objects — no current-step
   pointer, no mutable state. The actual lifecycle is the sequence of Runs.
 - **Not a generic workflow DSL.** A fixed field set, four action types, and
@@ -134,9 +135,11 @@ validation rule is implemented twice: the loader parses the document, checks its
 structure, and constructs the value objects, letting their `ValueError` carry
 every semantic rule.
 
-There is no discovery: `load_workflow` reads the path it is given. Where
-definition files live is decided by a later issue (SF-009 / SF-011). A loaded
-`Workflow` is configuration, not a runtime entity, and is not persisted.
+There is no discovery: `load_workflow` reads the path it is given. The reference
+definition lives at [`workflows/software-change.yaml`](../workflows/software-change.yaml);
+how a *target* repository obtains and selects a definition remains SF-11's
+decision. A loaded `Workflow` is configuration, not a runtime entity, and is not
+persisted.
 
 ### Strictness rules
 
@@ -185,8 +188,8 @@ software-change.yaml: steps[3].outcomes['approved']: OutcomeRule with action
 
 ## File format
 
-> The example below is the documented file format. It is **not** the SF-009
-> reference `software-change` definition, which is a separate deliverable; this
+> The example below illustrates the file format. The real reference definition
+> is [`workflows/software-change.yaml`](../workflows/software-change.yaml); this
 > shows the equivalent structure.
 
 ```yaml

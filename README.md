@@ -108,6 +108,8 @@ Requirements
 
 It also supports review-driven rework, research when a fundamental assumption is wrong, and human decisions.
 
+The reference definition ships at [`workflows/software-change.yaml`](workflows/software-change.yaml).
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). On a fresh checkout:

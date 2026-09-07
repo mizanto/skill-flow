@@ -11,9 +11,10 @@ Three boundaries, mirroring :mod:`skillflow.domain`:
   procedure modelled here is configuration read from disk (SF-A-2 §4:
   "Workflow Definitions can be persisted as definitions/configuration. They are
   not runtime entities"). This module has no ``to_row`` / ``from_row``.
-* **No YAML / IO.** Parsing a definition file into these objects is SF-008; the
-  reference ``software-change`` definition is SF-009. This module imports the
-  standard library only and reads neither disk nor clock.
+* **No YAML / IO.** Parsing a definition file into these objects is
+  :mod:`skillflow.workflow_loader`; the reference ``software-change`` definition
+  ships at ``workflows/software-change.yaml``. This module imports the standard
+  library only and reads neither disk nor clock.
 * **Not a runtime instance.** Only frozen value objects -- no current-step
   pointer, no mutable state, no ``WorkflowInstance``. A Workflow Definition
   describes normal procedure; the actual lifecycle is the sequence of Runs
