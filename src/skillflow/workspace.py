@@ -20,6 +20,10 @@ Layout::
 
 The ``runs/<run-id>/`` subdirectories are created per Run, not here -- there is
 no Run yet. Only the ``runs/`` parent is created.
+
+Workflow Definitions (``workflows/<definition-id>.yaml``) are committed project
+source at the repository root, not SkillFlow-owned state: they are named by
+:attr:`Workspace.workflows_dir` but never created by :func:`init_workspace`.
 """
 
 import sqlite3
@@ -32,6 +36,7 @@ __all__ = [
     "DB_FILE_NAME",
     "ARTIFACTS_DIR_NAME",
     "RUNS_DIR_NAME",
+    "WORKFLOWS_DIR_NAME",
     "SCHEMA_VERSION",
     "WorkspaceError",
     "RepositoryRootNotFoundError",
@@ -47,6 +52,12 @@ WORKSPACE_DIR_NAME = ".skillflow"
 DB_FILE_NAME = "skillflow.db"
 ARTIFACTS_DIR_NAME = "artifacts"
 RUNS_DIR_NAME = "runs"
+#: Directory (at the repository root) holding committed Workflow Definition
+#: files (``<definition-id>.yaml``). Named here so ``resolve-task`` can map a
+#: Task's ``workflow_definition_id`` to a file; never created by
+#: :func:`init_workspace`, because definitions are project source, not
+#: SkillFlow-owned state.
+WORKFLOWS_DIR_NAME = "workflows"
 
 #: The workspace database layout version, stamped into SQLite ``user_version``.
 #:
@@ -144,6 +155,11 @@ class Workspace:
     def runs_dir(self) -> Path:
         """The parent directory for per-Run diagnostics."""
         return self.path / RUNS_DIR_NAME
+
+    @property
+    def workflows_dir(self) -> Path:
+        """The repository-root directory of Workflow Definition files."""
+        return self.root / WORKFLOWS_DIR_NAME
 
 
 def find_repo_root(start: Path | None = None) -> Path:

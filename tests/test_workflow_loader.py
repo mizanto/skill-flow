@@ -45,9 +45,13 @@ INVALID = FIXTURES / "invalid"
 
 def test_all_matches_the_public_surface():
     assert set(workflow_loader.__all__) == {
+        "WORKFLOW_FILE_SUFFIX",
         "WorkflowLoadError",
+        "list_definition_ids",
+        "load_definition",
         "load_workflow",
         "parse_workflow",
+        "workflow_path",
     }
 
 

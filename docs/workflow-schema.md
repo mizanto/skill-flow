@@ -169,6 +169,17 @@ how a *target* repository obtains and selects a definition remains SF-11's
 decision. A loaded `Workflow` is configuration, not a runtime entity, and is not
 persisted.
 
+### Lookup by definition id
+
+`resolve-task` maps a Task's `workflow_definition_id` to a file with
+`workflow_loader.load_definition(directory, definition_id)`: the file is
+`<directory>/<definition-id>.yaml`, and the loaded `Workflow.name` must equal
+the id exactly (no case folding). File stem, `name:` and the Task's
+`workflow_definition_id` therefore always agree. `list_definition_ids`
+lists the available ids (sorted file stems) for the "select a Workflow"
+prompt. The directory is `<repo-root>/workflows/` (`Workspace.workflows_dir`);
+it holds committed project source and is never created by `init_workspace`.
+
 ### Strictness rules
 
 Three rejections belong to the loader because they are invisible by the time

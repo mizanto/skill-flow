@@ -56,10 +56,20 @@ from skillflow.workflow import (
 )
 
 __all__ = [
+    "WORKFLOW_FILE_SUFFIX",
     "WorkflowLoadError",
+    "list_definition_ids",
+    "load_definition",
     "load_workflow",
     "parse_workflow",
+    "workflow_path",
 ]
+
+#: The one filename suffix a Workflow Definition file carries. Fixed so that a
+#: definition id maps to exactly one path (``<id>.yaml``); ``.yml`` is not
+#: accepted, because two spellings for one concept is the drift this module
+#: exists to prevent.
+WORKFLOW_FILE_SUFFIX = ".yaml"
 
 
 class WorkflowLoadError(Exception):
@@ -359,3 +369,65 @@ def load_workflow(path: Path | str) -> Workflow:
         # WorkflowLoadError.
         raise WorkflowLoadError(f"{path}: not valid UTF-8: {exc}") from exc
     return parse_workflow(text, source=str(path))
+
+
+def workflow_path(directory: Path | str, definition_id: str) -> Path:
+    """Return the file holding definition ``definition_id`` under ``directory``.
+
+    The convention is ``<directory>/<definition-id>.yaml``. An id that is
+    blank or could escape the directory -- containing ``/``, ``\\\\`` or
+    ``..`` -- is rejected with :class:`WorkflowLoadError`: ids arrive from the
+    database and from user input and must never read outside ``directory``.
+    """
+    if not isinstance(definition_id, str) or not definition_id.strip():
+        raise WorkflowLoadError(
+            f"{directory}: invalid workflow definition id {definition_id!r}; "
+            "an id must be a non-empty string"
+        )
+    if "/" in definition_id or "\\" in definition_id or ".." in definition_id:
+        raise WorkflowLoadError(
+            f"{directory}: invalid workflow definition id {definition_id!r}; "
+            "an id must not contain a path separator or '..'"
+        )
+    return Path(directory) / f"{definition_id}{WORKFLOW_FILE_SUFFIX}"
+
+
+def list_definition_ids(directory: Path | str) -> tuple[str, ...]:
+    """Return the sorted ids of the definitions in ``directory``.
+
+    Lists file stems only -- parsing every file just to render a selection
+    prompt is disproportionate. An absent (or non-directory) ``directory`` is
+    not an error: it yields ``()`` and the caller turns that into the
+    actionable "no Workflow Definitions found" message.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            p.stem
+            for p in directory.glob(f"*{WORKFLOW_FILE_SUFFIX}")
+            if p.is_file()
+        )
+    )
+
+
+def load_definition(directory: Path | str, definition_id: str) -> Workflow:
+    """Load definition ``definition_id`` from ``directory``.
+
+    Reads ``workflow_path(directory, definition_id)`` and verifies the loaded
+    ``Workflow.name`` is ``definition_id`` -- the persisted
+    ``WorkflowDefinition.id`` *is* ``Workflow.name``
+    (:mod:`skillflow.service`), so a file whose stem and ``name:`` disagree is
+    a definition problem naming both. Comparison is exact: no case folding,
+    matching the rest of the codebase.
+    """
+    path = workflow_path(directory, definition_id)
+    workflow = load_workflow(path)
+    if workflow.name != definition_id:
+        raise WorkflowLoadError(
+            f"{path}: workflow name {workflow.name!r} does not match "
+            f"definition id {definition_id!r}; the file stem, `name:` and the "
+            "Task's `workflow_definition_id` must agree"
+        )
+    return workflow

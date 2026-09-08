@@ -45,6 +45,7 @@ def test_public_surface():
         "DB_FILE_NAME",
         "ARTIFACTS_DIR_NAME",
         "RUNS_DIR_NAME",
+        "WORKFLOWS_DIR_NAME",
         "SCHEMA_VERSION",
         "WorkspaceError",
         "RepositoryRootNotFoundError",
