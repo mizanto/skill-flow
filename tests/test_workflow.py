@@ -56,6 +56,7 @@ V0_FIELDS = {
         "model",
         "effort",
         "outputs",
+        "context",
         "outcomes",
         "decisions",
     },
@@ -336,6 +337,41 @@ def test_workflow_step_duplicate_outcome_key_after_stripping_rejected():
 def test_workflow_step_non_iterable_outputs_rejected(bad):
     with pytest.raises(ValueError, match="WorkflowStep.outputs must be an iterable"):
         WorkflowStep(id="s1", skill="sk", outputs=bad)
+
+
+# --- WorkflowStep.context validation --------------------------------------
+
+
+def test_workflow_step_context_defaults_to_empty_tuple():
+    assert WorkflowStep(id="s1", skill="sk").context == ()
+
+
+def test_workflow_step_context_is_a_tuple_and_strips_items():
+    step = WorkflowStep(id="s1", skill="sk", context=[" requirements ", "plan"])
+    assert step.context == ("requirements", "plan")
+
+
+@pytest.mark.parametrize("bad", [None, 42, "requirements"])
+def test_workflow_step_non_iterable_context_rejected(bad):
+    with pytest.raises(ValueError, match="WorkflowStep.context must be an iterable"):
+        WorkflowStep(id="s1", skill="sk", context=bad)
+
+
+@pytest.mark.parametrize("bad", [1, None, {"type": "x"}])
+def test_workflow_step_non_string_context_item_rejected(bad):
+    with pytest.raises(ValueError, match=r"WorkflowStep.context\[0\]"):
+        WorkflowStep(id="s1", skill="sk", context=[bad])
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_workflow_step_blank_context_item_rejected(blank):
+    with pytest.raises(ValueError, match=r"WorkflowStep.context\[0\]"):
+        WorkflowStep(id="s1", skill="sk", context=[blank])
+
+
+def test_workflow_step_duplicate_context_type_after_stripping_rejected():
+    with pytest.raises(ValueError, match="duplicate type 'plan'"):
+        WorkflowStep(id="s1", skill="sk", context=[" plan ", "plan"])
 
 
 # --- Workflow validation -----------------------------------------

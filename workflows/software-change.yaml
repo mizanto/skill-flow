@@ -25,6 +25,8 @@ steps:
     skill: decomposition
     model: opus
     effort: high
+    # Consumes the requirements produced by the first step (SF-A-1 §9).
+    context: [requirements]
     outputs:
       - type: plan
         required: true
@@ -37,6 +39,11 @@ steps:
     skill: implementation
     model: sonnet
     effort: high
+    # 'review' resolves only on a rework Run (after review/changes_requested);
+    # on the first pass it is simply unresolved. This declares "this step reads
+    # reviews", not a transition -- the rework routing stays in
+    # review.outcomes.changes_requested.
+    context: [requirements, plan, review]
     outcomes:
       ready: { action: run, step: review }               # A
 
@@ -44,6 +51,7 @@ steps:
     skill: code-review
     model: opus
     effort: high
+    context: [requirements, plan]
     outputs:
       - type: review
         required: true

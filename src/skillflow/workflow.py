@@ -194,6 +194,14 @@ class WorkflowStep:
     rule of ``action: human`` must declare at least one ``decisions`` entry:
     otherwise ``/skillflow:decide`` rejects every decision (SF-A-5 §7.5) and the
     Task is stranded in ``waiting_for_human``.
+
+    ``context`` names the artifact **types** this step consumes -- the explicit
+    half of Context Selection (SF-A-1 §9). It is a flat list of identifiers,
+    deliberately with no conditions, patterns, versions, or per-entry options
+    (that is the DSL drift this schema exists to prevent). A type the Task has
+    never produced is not an error here; resolving the declaration against a
+    Task's artifacts is :func:`skillflow.context.select_context`, which reports
+    an unmatched type as unresolved rather than raising.
     """
 
     id: str
@@ -201,6 +209,7 @@ class WorkflowStep:
     model: str | None = None
     effort: str | None = None
     outputs: tuple[ExpectedOutput, ...] = ()
+    context: tuple[str, ...] = ()
     outcomes: Mapping[str, OutcomeRule] = _EMPTY_MAP
     decisions: Mapping[str, OutcomeRule] = _EMPTY_MAP
 
@@ -219,6 +228,19 @@ class WorkflowStep:
                 )
             seen_types.add(output.type)
         object.__setattr__(self, "outputs", outputs)
+
+        context = _require_sequence(self.context, "WorkflowStep.context")
+        seen_context: set[str] = set()
+        cleaned_context: list[str] = []
+        for i, raw in enumerate(context):
+            identifier = _require_text(raw, f"WorkflowStep.context[{i}]")
+            if identifier in seen_context:
+                raise ValueError(
+                    f"WorkflowStep.context has a duplicate type {identifier!r}"
+                )
+            seen_context.add(identifier)
+            cleaned_context.append(identifier)
+        object.__setattr__(self, "context", tuple(cleaned_context))
 
         object.__setattr__(
             self, "outcomes", _freeze_rules(self.outcomes, "WorkflowStep.outcomes")

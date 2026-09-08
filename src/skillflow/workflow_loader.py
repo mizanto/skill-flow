@@ -131,7 +131,7 @@ class _StrictLoader(yaml.SafeLoader):
 
 _TOP_KEYS = frozenset({"name", "steps"})
 _STEP_KEYS = frozenset(
-    {"id", "skill", "model", "effort", "outputs", "outcomes", "decisions"}
+    {"id", "skill", "model", "effort", "outputs", "context", "outcomes", "decisions"}
 )
 _OUTPUT_KEYS = frozenset({"type", "required"})
 _RULE_KEYS = frozenset({"action", "step", "skill"})
@@ -288,6 +288,15 @@ def _build_step(raw: object, source: str, index: int) -> WorkflowStep:
             _build_output(item, source, f"{where}.outputs[{i}]")
             for i, item in enumerate(raw_outputs)
         )
+
+    if "context" in mapping:
+        # Item-level validation (non-string, blank, duplicate) stays in the
+        # schema layer and reaches the caller through the _construct seam below,
+        # so no rule is implemented twice. A null context: is caught here.
+        kwargs["context"] = tuple(
+            _require_list(mapping["context"], source, f"{where}.context", empty="[]")
+        )
+
     for key in ("outcomes", "decisions"):
         if key in mapping:
             kwargs[key] = _build_rules(

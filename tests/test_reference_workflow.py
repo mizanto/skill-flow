@@ -64,6 +64,17 @@ def test_expected_outputs():
     }
 
 
+def test_context_declarations():
+    workflow = load_workflow(REFERENCE)
+    context = {step.id: step.context for step in workflow.steps}
+    assert context == {
+        "requirements": (),
+        "decomposition": ("requirements",),
+        "implementation": ("requirements", "plan", "review"),
+        "review": ("requirements", "plan"),
+    }
+
+
 def test_scenario_a_happy_path():
     workflow = load_workflow(REFERENCE)
     for current, nxt in zip(CHAIN[:-1], CHAIN[1:], strict=True):

@@ -269,6 +269,27 @@ def test_aliases_are_allowed_even_though_merge_keys_are_not():
     assert [step.skill for step in loaded.steps] == ["implementation", "implementation"]
 
 
+def test_context_list_parses_into_the_step():
+    loaded = parse_workflow(
+        "name: w\n"
+        "steps:\n"
+        "  - id: a\n"
+        "    skill: implementation\n"
+        "  - id: b\n"
+        "    skill: implementation\n"
+        "    context: [requirements, plan]\n"
+    )
+    assert loaded.find_step("a").context == ()
+    assert loaded.find_step("b").context == ("requirements", "plan")
+
+
+def test_explicit_empty_context_is_accepted():
+    loaded = parse_workflow(
+        "name: w\nsteps:\n  - id: a\n    skill: implementation\n    context: []\n"
+    )
+    assert loaded.initial_step.context == ()
+
+
 def test_parse_workflow_default_source_appears_in_errors():
     with pytest.raises(WorkflowLoadError, match=r"^<string>: "):
         parse_workflow("name: w\n")
@@ -352,6 +373,16 @@ INVALID_FIXTURES = {
     "null-model.yaml": ("steps[0].model", "expected a value, got nothing"),
     "null-effort.yaml": ("steps[0].effort", "expected a value, got nothing"),
     "outputs-not-a-list.yaml": ("steps[0].outputs", "expected a list, got dict"),
+    "null-context.yaml": ("steps[0].context", "expected a list, got nothing"),
+    "context-not-a-list.yaml": ("steps[0].context", "expected a list, got dict"),
+    "context-non-string.yaml": (
+        "steps[0]",
+        "WorkflowStep.context[0] must be a non-empty string",
+    ),
+    "duplicate-context-type.yaml": (
+        "steps[0]",
+        "WorkflowStep.context has a duplicate type 'plan'",
+    ),
     "output-not-a-mapping.yaml": (
         "steps[0].outputs[0]",
         "expected a mapping, got str",

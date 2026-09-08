@@ -59,6 +59,7 @@ Identify steps by `id`, not by `hash()`.
 | `model`     | `str \| None`                 | Optional execution parameter. Free string (e.g. `opus`), not an enum. |
 | `effort`    | `str \| None`                 | Optional execution parameter. Free string (e.g. `high`), not an enum. |
 | `outputs`   | `tuple[ExpectedOutput, ...]`  | Default `()`. Must be iterable; duplicate `type` rejected. |
+| `context`   | `tuple[str, ...]`             | Default `()`. Artifact **types** this step consumes. Flat list of identifiers (stripped, non-blank, no duplicates after stripping). No conditions, patterns, or versions. |
 | `outcomes`  | `Mapping[str, OutcomeRule]`   | Default empty. Keys are Result-outcome decision strings (stripped, non-blank, no duplicates after stripping). |
 | `decisions` | `Mapping[str, OutcomeRule]`   | Default empty. Keys are Human-Decision strings. A rule mapping to `action: human` is rejected (SF-A-5 §7.7). |
 
@@ -77,6 +78,28 @@ the artifacts a Run registered is `skillflow.outputs.validate_outputs` (SF-16):
 the match scope is the current Run (the `(task_id, name)` version chain spans
 Runs), matching is by `type` exactly, and the declared constraint set is exactly
 `{type, required}`.
+
+### Context Selection
+
+`WorkflowStep.context` lists the artifact **types** a step consumes. Resolving
+that declaration against a Task's artifact metadata is
+`skillflow.context.select_context` (SF-17), a pure, LLM-free operation:
+
+- **Task scope.** Selection ranges over every artifact the Task has produced,
+  across Runs — unlike output validation, which is per-Run. This is what lets a
+  rework `implementation` Run receive the previous Run's `review`.
+- **Latest version per name.** For each declared type, every distinct artifact
+  `name` of that type is resolved to its chain head (highest `version`);
+  superseded versions are never selected. Survivors are ordered by name;
+  entries follow `context` declaration order.
+- **Unresolved types are reported, not raised.** A declared type the Task has
+  never produced (a first-pass `implementation` Run has no `review`) appears in
+  `ContextSelection.unresolved`; it is not an error.
+- **Metadata only.** Selection returns artifact references, never file content.
+
+Declaring `context: [review]` on `implementation` says "this step reads
+reviews" — it is not a transition. Rework routing stays in
+`review.outcomes.changes_requested`.
 
 ### `OutcomeRule`
 
@@ -113,7 +136,8 @@ All violations raise `ValueError` at construction.
   neither.
 - **`WorkflowStep`**: `id`, `skill` non-blank; `model`, `effort` non-blank when
   present; `outputs` iterable and all `ExpectedOutput` with no duplicate `type`;
-  `outcomes` / `decisions` are mappings with non-blank keys (no duplicates after
+  `context` iterable of non-blank strings with no duplicate type (after
+  stripping); `outcomes` / `decisions` are mappings with non-blank keys (no duplicates after
   stripping) and `OutcomeRule` values; no `decisions` rule maps to `action:
   human`; a step with an `outcomes` rule of `action: human` **must** declare at
   least one `decisions` entry — otherwise `/skillflow:decide` would reject every
@@ -214,6 +238,7 @@ steps:
     skill: decomposition
     model: opus
     effort: high
+    context: [requirements]                         # artifact types this step consumes
     outputs:
       - type: plan
         required: true
@@ -224,6 +249,7 @@ steps:
     skill: implementation
     model: sonnet
     effort: high
+    context: [requirements, plan, review]           # 'review' resolves only on a rework Run
     outcomes:
       ready: { action: run, step: review }           # A
 
@@ -231,6 +257,7 @@ steps:
     skill: code-review
     model: opus
     effort: high
+    context: [requirements, plan]
     outputs:
       - type: review
         required: true
