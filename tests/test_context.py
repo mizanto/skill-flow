@@ -263,6 +263,20 @@ def test_selection_is_deterministic_across_shuffled_input():
     assert forward == backward
 
 
+def test_selection_is_order_independent_even_for_a_duplicated_name_version_pair():
+    # Two artifacts sharing (name, version) but differing in id/path -- a state
+    # the store's UNIQUE (task_id, name, version) forbids, but select_context
+    # accepts any Iterable[Artifact] and promises an unconditional purity
+    # property. The (version, id) comparison key keeps the result total.
+    left = _artifact(id="a-left", name="a.md", type="plan", path="task-1/a-left.md")
+    right = _artifact(id="a-right", name="a.md", type="plan", path="task-1/a-right.md")
+    step = _step(context=["plan"])
+    forward = select_context(step=step, task=_task(), artifacts=[left, right])
+    backward = select_context(step=step, task=_task(), artifacts=[right, left])
+    assert forward == backward
+    assert forward.entries[0].artifacts == (right,)  # higher id wins the tie
+
+
 def test_selection_accepts_a_one_shot_iterable_and_does_not_mutate_inputs():
     arts = [_artifact()]
     step = _step(context=["requirements"])

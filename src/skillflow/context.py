@@ -131,15 +131,22 @@ def _latest_per_name(
 ) -> tuple[Artifact, ...]:
     """Chain head of each name of ``declared_type``, ordered by name.
 
-    ``UNIQUE (task_id, name, version)`` (SF-A-2 §5) makes "highest version per
-    name" tie-free, so no secondary key is needed.
+    ``UNIQUE (task_id, name, version)`` (SF-A-2 §5) already makes "highest
+    version per name" tie-free for artifacts read back from the store. The
+    comparison key is nonetheless ``(version, id)`` rather than ``version``
+    alone, so the result stays order-independent even for a hand-assembled input
+    that violates that constraint -- the module docstring's purity claim then
+    holds unconditionally, not just for store-backed callers.
     """
     heads: dict[str, Artifact] = {}
     for artifact in artifacts:
         if artifact.type != declared_type:
             continue
         current = heads.get(artifact.name)
-        if current is None or artifact.version > current.version:
+        if current is None or (artifact.version, artifact.id) > (
+            current.version,
+            current.id,
+        ):
             heads[artifact.name] = artifact
     return tuple(heads[name] for name in sorted(heads))
 
