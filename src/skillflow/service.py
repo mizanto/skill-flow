@@ -29,8 +29,14 @@ Boundaries this module keeps:
   already-loaded ``Workflow``; the caller decides which file to load (discovery
   is a later issue). This module imports ``domain``, ``store`` and ``workflow``
   -- never ``workflow_loader``, never ``yaml``.
-* **Creates no Run.** :func:`create_task` creates a Task only. The next Run is
-  never created here (SF-A-3; AGENTS.md) -- that is a later issue's concern.
+* **Creates a Run only from a resolved lifecycle action, never a next Run.**
+  :func:`create_run` turns an :class:`skillflow.evaluator.EvaluationOutput` whose
+  ``action`` is ``run`` into a persisted ``running`` Run. It does not decide
+  *whether* to run, pick the action, load a Workflow file, launch anything, or
+  touch the ``tasks`` row. The *next* Run after a Run completes is still never
+  created in the current session (SF-A-3; AGENTS.md): ``complete-run`` must not
+  call :func:`create_run`; only ``resolve-task``, which runs in a new session,
+  does.
 
 **Workflow assignment (v0):** :func:`assign_workflow` binds a *registered*
 definition to an *existing* Task. It only ever **fills an empty slot** -- the
@@ -49,18 +55,23 @@ from skillflow import store
 from skillflow.domain import (
     LifecycleEvent,
     LifecycleEventType,
+    Run,
+    RunStatus,
     Task,
     TaskStatus,
     WorkflowDefinition,
 )
-from skillflow.workflow import Workflow
+from skillflow.evaluator import EvaluationOutput
+from skillflow.workflow import ActionType, Workflow
 
 __all__ = [
     "UnknownWorkflowError",
     "WorkflowAssignmentError",
+    "RunCreationError",
     "register_workflow",
     "create_task",
     "assign_workflow",
+    "create_run",
 ]
 
 #: Task statuses that forbid Workflow assignment: a Workflow governs future
@@ -94,6 +105,23 @@ class WorkflowAssignmentError(Exception):
     Deliberately **not** a ``ValueError`` (so a caller catching this does not
     also swallow the domain layer's programming errors) and **not** a
     ``sqlite3.Error`` (this is a domain rejection, not a storage failure).
+    """
+
+
+class RunCreationError(Exception):
+    """The Task's state or the named triggering Run forbids creating a Run.
+
+    Raised when the Task does not exist in an ``active`` state, or when
+    ``triggered_by_run_id`` names a Run that belongs to a different Task. One
+    flat class, matching :class:`UnknownWorkflowError` / :class:`store.
+    InvariantViolationError`: callers distinguish causes by message. Deliberately
+    **not** a ``ValueError`` (so a caller catching this does not also swallow the
+    domain layer's programming errors) and **not** a ``sqlite3.Error`` (this is a
+    domain rejection, not a storage failure).
+
+    A duplicate running Run keeps raising ``store.InvariantViolationError``
+    unwrapped -- that message already names both Run ids -- so the service adds
+    no second pre-check for it.
     """
 
 
@@ -266,3 +294,156 @@ def assign_workflow(
             ),
         )
     return updated
+
+
+#: Task status that permits creating a Run. Every legitimate creation path --
+#: initial resolution (SF-A-5 §4.9), ``complete-run`` with a ``run`` action
+#: (§6.9), ``decide`` with a ``run`` action (§7.7, ``waiting_for_human`` ->
+#: ``active``) -- reaches an ``active`` Task. Creating a ``running`` Run while the
+#: Task waits on a human would strand ``/skillflow:decide``.
+_RUNNABLE_TASK_STATUS = TaskStatus.ACTIVE
+
+
+def create_run(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    action: EvaluationOutput,
+    triggered_by_run_id: str | None = None,
+    instructions: str | None = None,
+) -> Run:
+    """Create a ``running`` Run from a resolved lifecycle action, atomically with
+    its ``run.created`` event.
+
+    The trigger provenance is **derived from the action, not supplied as free
+    text**: ``trigger_reason`` is ``action.reason`` and ``step_id`` is
+    ``action.step``. Both :func:`skillflow.evaluator.resolve_initial_action`
+    (``reason == "initial"``) and :func:`skillflow.evaluator.evaluate`
+    (``reason == <outcome/decision>``) produce an ``EvaluationOutput``, so the
+    initial and subsequent cases go through one code path and the service is
+    structurally unable to invent a step or a reason -- the same mechanical
+    guarantee :func:`assign_workflow` uses for Workflow selection.
+
+    ``action`` is keyword-only with no default: :func:`create_run` never chooses
+    the action.
+
+    Rules, evaluated in this order (the order is the contract -- it fixes error
+    precedence):
+
+    1. ``action`` must be an :class:`~skillflow.evaluator.EvaluationOutput` ->
+       ``ValueError``.
+    2. ``action.action`` must be ``run`` -> ``ValueError``. ``human`` /
+       ``complete`` / ``cancel`` do not create a Run (SF-A-5 §6.9 / §7.7).
+    3. Task must exist -> ``LookupError`` (matching :func:`assign_workflow`,
+       ``artifacts.create_artifact``).
+    4. Task must be ``active`` -> :class:`RunCreationError` (see
+       ``_RUNNABLE_TASK_STATUS``).
+    5. If ``triggered_by_run_id`` is given, that Run must exist and its
+       ``task_id`` must equal the Task's id -> :class:`RunCreationError` naming
+       both. ``runs.triggered_by_run_id``'s foreign key only proves the Run
+       exists, not that it belongs to this Task.
+    6. If ``action.step`` is set but the Task has no ``workflow_definition_id``
+       -> ``ValueError``: a step id is meaningless without its Workflow
+       (unreachable through ``resolve_initial_action``, which raises
+       ``WorkflowSelectionRequiredError`` first).
+    7. Construct the ``Run`` -- ``created_at == started_at == datetime.now(UTC)``
+       read once, ``status`` ``running`` (no ``pending`` state, SF-A-5 §4.7).
+       ``domain.Run.__post_init__`` then enforces the two provenance shapes --
+       an ``initial`` reason must have no triggering Run; any other reason must
+       have one -- and those checks are reused here, not restated.
+    8. In one ``with conn:`` block: ``store.insert_run`` then the ``run.created``
+       event. ``insert_run`` raises ``store.InvariantViolationError`` if the Task
+       already has a running Run, and the transaction rolls back, so no event
+       survives.
+
+    Deviation (AGENTS.md principle 14): **``run.started`` is not emitted.** There
+    is no ``pending`` state, so creation and start are the same instant; a second
+    event with an identical ``created_at`` and no distinct state change is noise.
+    ``LifecycleEventType.RUN_STARTED`` stays unused in v0.
+
+    Known dead end: a **skill-targeted action** (SF-A-4 §9) produces a Run with
+    ``step_id is None``. When that Run completes, ``evaluator.evaluate`` cannot
+    map it -- a Run with no step has no outcome rules -- and no v0 lifecycle rule
+    can advance the Task. The action's ``skill`` is recorded in the
+    ``run.created`` payload only (the ``Run`` has no skill column). Giving a
+    skill-targeted Run a lifecycle meaning is a later issue; ``create_run`` still
+    records it, because rejecting a valid action here would contradict SF-A-4 §9.
+
+    Non-goals: it never chooses *whether* to run, never picks the action, never
+    loads a Workflow file, never launches anything, never creates a *next* Run
+    (``complete-run`` does not call it), and never touches the ``tasks`` row --
+    ``resolve-task`` leaves the Task ``active`` (SF-A-5 §4.9).
+    """
+    if not isinstance(action, EvaluationOutput):
+        raise ValueError("create_run() action must be an EvaluationOutput")
+    if action.action is not ActionType.RUN:
+        raise ValueError(
+            f"create_run() action must be 'run', got {action.action.value!r}; "
+            "a 'human' / 'complete' / 'cancel' action does not create a Run"
+        )
+
+    task = store.get_task(conn, task_id)
+    if task is None:
+        raise LookupError(f"no task with id {task_id!r}")
+    if task.status is not _RUNNABLE_TASK_STATUS:
+        raise RunCreationError(
+            f"task {task.id!r} is {task.status.value!r}; a Run can only be "
+            f"created for an {_RUNNABLE_TASK_STATUS.value!r} Task"
+        )
+
+    if triggered_by_run_id is not None:
+        trigger = store.get_run(conn, triggered_by_run_id)
+        if trigger is None:
+            raise RunCreationError(
+                f"triggered_by_run_id {triggered_by_run_id!r} names no Run"
+            )
+        if trigger.task_id != task.id:
+            raise RunCreationError(
+                f"triggering run {trigger.id!r} belongs to task "
+                f"{trigger.task_id!r}, not {task.id!r}"
+            )
+
+    if action.step is not None and task.workflow_definition_id is None:
+        raise ValueError(
+            f"action targets step {action.step!r} but task {task.id!r} has no "
+            "workflow definition"
+        )
+
+    now = datetime.now(UTC)
+    run = Run(
+        id=_new_id("run"),
+        task_id=task.id,
+        status=RunStatus.RUNNING,
+        created_at=now,
+        started_at=now,
+        workflow_definition_id=task.workflow_definition_id,
+        step_id=action.step,
+        instructions=instructions,
+        triggered_by_run_id=triggered_by_run_id,
+        trigger_reason=action.reason,
+    )
+
+    payload = {"status": run.status.value, "trigger_reason": run.trigger_reason}
+    if run.triggered_by_run_id is not None:
+        payload["triggered_by_run_id"] = run.triggered_by_run_id
+    if run.workflow_definition_id is not None:
+        payload["workflow_definition_id"] = run.workflow_definition_id
+    if run.step_id is not None:
+        payload["step_id"] = run.step_id
+    if action.skill is not None:
+        payload["skill"] = action.skill
+
+    with conn:
+        store.insert_run(conn, run)
+        store.insert_lifecycle_event(
+            conn,
+            LifecycleEvent(
+                id=_new_id("event"),
+                task_id=run.task_id,
+                run_id=run.id,
+                type=LifecycleEventType.RUN_CREATED,
+                payload=payload,
+                created_at=now,
+            ),
+        )
+    return run

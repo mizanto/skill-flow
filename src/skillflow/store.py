@@ -486,6 +486,13 @@ def insert_run(conn: sqlite3.Connection, run: Run) -> None:
     Enforces **one running Run per Task**: if ``run`` is ``running`` and the Task
     already has a running Run, raises :class:`InvariantViolationError` naming
     both. The ``runs_one_running_per_task`` partial index is the backstop.
+
+    Does **not** check that ``triggered_by_run_id`` names a Run belonging to
+    ``run.task_id`` -- the foreign key proves only that the Run exists. That
+    cross-Task provenance check is ``service.create_run``'s (SF-18); do not add a
+    duplicate here. If a later issue adds a composite ``(task_id, id)`` foreign
+    key on ``triggered_by_run_id`` it should replace that service check, not sit
+    beside it.
     """
     if run.status is RunStatus.RUNNING:
         existing = _running_run_id(conn, run.task_id)

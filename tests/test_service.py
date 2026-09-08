@@ -4,15 +4,19 @@ Two kinds of test, matching ``test_store.py`` / ``test_workspace.py``:
 
 * **Contract change-detectors** -- the public surface, the import boundary (the
   service reads no definition files), and the ``UnknownWorkflowError`` /
-  ``WorkflowAssignmentError`` types.
+  ``WorkflowAssignmentError`` / ``RunCreationError`` types.
 * **Behaviour tests** -- Task creation (status, ids, timestamps, round-trip,
   durability, the ``task.created`` event, workflow-reference validation and
   atomicity), ``register_workflow`` idempotence and commit, ``assign_workflow``
   (persistence, immutable-field preservation, durability, the
   ``task.workflow_assigned`` event, ``waiting_for_human`` acceptance,
   idempotent no-op / normalisation, every rejection path proving no write,
-  error precedence, and transaction atomicity), and the SF-8 -> SF-9
-  integration path through the real reference definition.
+  error precedence, and transaction atomicity), ``create_run`` (initial and
+  subsequent provenance, the ``running`` status with no ``pending`` state, the
+  ``run.created`` event with no ``run.started``, every rejection path proving no
+  write, error precedence, atomicity, and the wave-5 vertical slice over the
+  real reference definition), and the SF-8 -> SF-9 integration path through the
+  real reference definition.
 """
 
 import ast
@@ -26,15 +30,30 @@ from pathlib import Path
 import pytest
 
 from skillflow import service, store, workspace
-from skillflow.domain import LifecycleEventType, TaskStatus
+from skillflow.domain import (
+    LifecycleEventType,
+    Outcome,
+    Result,
+    ResultStatus,
+    RunStatus,
+    TaskStatus,
+)
+from skillflow.evaluator import (
+    EvaluationInput,
+    EvaluationOutput,
+    evaluate,
+    resolve_initial_action,
+)
 from skillflow.service import (
+    RunCreationError,
     UnknownWorkflowError,
     WorkflowAssignmentError,
     assign_workflow,
+    create_run,
     create_task,
     register_workflow,
 )
-from skillflow.workflow import Workflow, WorkflowStep
+from skillflow.workflow import ActionType, Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
 REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
@@ -67,9 +86,11 @@ def test_public_surface():
     assert set(service.__all__) == {
         "UnknownWorkflowError",
         "WorkflowAssignmentError",
+        "RunCreationError",
         "register_workflow",
         "create_task",
         "assign_workflow",
+        "create_run",
     }
 
 
@@ -492,3 +513,445 @@ def test_assign_workflow_and_event_are_one_transaction(conn, monkeypatch):
         assign_workflow(conn, task_id=task.id, workflow_definition_id="demo")
 
     _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+# --- create_run ------------------------------------------------------
+
+
+def _flow(name="flow"):
+    return Workflow(
+        name=name,
+        steps=(
+            WorkflowStep(id="first", skill="s1"),
+            WorkflowStep(id="second", skill="s2"),
+        ),
+    )
+
+
+def _bound_task(conn, *, name="flow", title="Runnable"):
+    workflow = _flow(name)
+    register_workflow(conn, workflow)
+    task = create_task(conn, title=title, workflow_definition_id=name)
+    return workflow, task
+
+
+def _initial(workflow, task):
+    return resolve_initial_action(task, workflow)
+
+
+def _run_events(conn, task_id, run_id):
+    return [
+        e
+        for e in store.list_lifecycle_events_for_task(conn, task_id)
+        if e.run_id == run_id
+    ]
+
+
+def _task_events(conn, task_id):
+    return [e for e in _rows(conn, "lifecycle_events") if e["task_id"] == task_id]
+
+
+def _assert_nothing_written(conn, *, events):
+    """No Run row, and the lifecycle_events count is still ``events`` (plan §8)."""
+    assert _rows(conn, "runs") == []
+    assert len(_rows(conn, "lifecycle_events")) == events
+
+
+def _complete(conn, run):
+    done = replace(
+        run,
+        status=RunStatus.COMPLETED,
+        completed_at=run.started_at + timedelta(seconds=1),
+    )
+    with conn:
+        store.update_run(conn, done)
+    return store.get_run(conn, run.id)
+
+
+# create_run: contract change-detectors
+
+
+def test_run_creation_error_is_a_distinct_type():
+    assert not issubclass(RunCreationError, ValueError)
+    assert not issubclass(RunCreationError, sqlite3.Error)
+
+
+def test_create_run_never_infers_an_action():
+    # action is keyword-only with no default: the caller must supply the
+    # resolved lifecycle action, so nothing here can select one.
+    param = inspect.signature(create_run).parameters["action"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+def test_create_run_rejects_a_non_evaluation_output(conn):
+    _, task = _bound_task(conn)
+    with pytest.raises(ValueError, match="EvaluationOutput"):
+        create_run(conn, task_id=task.id, action="run")
+    assert _rows(conn, "runs") == []
+    assert _rows(conn, "lifecycle_events") == _task_events(conn, task.id)
+
+
+# create_run: shape / initial provenance
+
+
+def test_create_run_from_initial_action_is_running_with_initial_provenance(conn):
+    workflow, task = _bound_task(conn)
+    action = _initial(workflow, task)
+    task_before = store.get_task(conn, task.id)
+
+    run = create_run(conn, task_id=task.id, action=action)
+
+    assert run.status is RunStatus.RUNNING
+    assert run.created_at == run.started_at
+    assert run.completed_at is None
+    assert run.trigger_reason == "initial"
+    assert run.triggered_by_run_id is None
+    assert run.step_id == action.step == "first"
+    assert run.workflow_definition_id == task.workflow_definition_id == "flow"
+    assert run.id.startswith("run-")
+    # create_run never touches the tasks row: the Task stays active, unbumped
+    # (SF-A-5 §4.9). assign_workflow, next door, does bump updated_at.
+    assert store.get_task(conn, task.id) == task_before
+
+
+def test_create_run_round_trips_by_full_equality(conn):
+    workflow, task = _bound_task(conn)
+    run = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    assert store.get_run(conn, run.id) == run
+
+
+def test_create_run_is_committed(conn, ws):
+    workflow, task = _bound_task(conn)
+    run = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    with contextlib.closing(store.open_store(ws)) as reopened:
+        assert store.get_run(reopened, run.id) == run
+
+
+def test_two_runs_on_different_tasks_get_different_ids(conn):
+    workflow, task_a = _bound_task(conn, title="A")
+    task_b = create_task(conn, title="B", workflow_definition_id="flow")
+    a = create_run(conn, task_id=task_a.id, action=_initial(workflow, task_a))
+    b = create_run(conn, task_id=task_b.id, action=_initial(workflow, task_b))
+    assert a.id != b.id
+
+
+@pytest.mark.parametrize("instructions", ["do this", "", None])
+def test_create_run_passes_instructions_through(conn, instructions):
+    workflow, task = _bound_task(conn)
+    run = create_run(
+        conn,
+        task_id=task.id,
+        action=_initial(workflow, task),
+        instructions=instructions,
+    )
+    assert run.instructions == instructions
+    assert store.get_run(conn, run.id).instructions == instructions
+
+
+def test_create_run_rejects_non_string_instructions_with_no_write(conn):
+    workflow, task = _bound_task(conn)
+    with pytest.raises(ValueError, match="Run.instructions"):
+        create_run(
+            conn,
+            task_id=task.id,
+            action=_initial(workflow, task),
+            instructions=123,
+        )
+    assert _rows(conn, "runs") == []
+    assert [e.type for e in store.list_lifecycle_events_for_task(conn, task.id)] == [
+        LifecycleEventType.TASK_CREATED
+    ]
+
+
+# create_run: the run.created event
+
+
+def test_create_run_writes_exactly_one_run_created_event(conn):
+    workflow, task = _bound_task(conn)
+    run = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+
+    events = _run_events(conn, task.id, run.id)
+    assert len(events) == 1
+    (event,) = events
+    assert event.type is LifecycleEventType.RUN_CREATED
+    assert event.run_id == run.id
+    assert event.created_at == run.created_at
+    assert dict(event.payload) == {
+        "status": "running",
+        "trigger_reason": "initial",
+        "workflow_definition_id": "flow",
+        "step_id": "first",
+    }
+
+
+def test_create_run_emits_no_run_started_event(conn):
+    workflow, task = _bound_task(conn)
+    run = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    types_ = [e.type for e in _run_events(conn, task.id, run.id)]
+    assert LifecycleEventType.RUN_STARTED not in types_
+
+
+# create_run: subsequent provenance
+
+
+def test_subsequent_run_references_the_triggering_run_and_reason(conn):
+    workflow, task = _bound_task(conn)
+    first = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    _complete(conn, first)
+
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="second")
+    second = create_run(
+        conn, task_id=task.id, action=action, triggered_by_run_id=first.id
+    )
+
+    assert second.triggered_by_run_id == first.id
+    assert second.trigger_reason == "ready"
+    assert second.step_id == "second"
+    (event,) = _run_events(conn, task.id, second.id)
+    assert dict(event.payload) == {
+        "status": "running",
+        "trigger_reason": "ready",
+        "triggered_by_run_id": first.id,
+        "workflow_definition_id": "flow",
+        "step_id": "second",
+    }
+
+
+def test_skill_targeted_action_records_the_skill_and_no_step(conn):
+    workflow, task = _bound_task(conn)
+    first = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    _complete(conn, first)
+
+    action = EvaluationOutput(
+        action=ActionType.RUN, reason="fundamental_assumption_wrong", skill="research"
+    )
+    run = create_run(conn, task_id=task.id, action=action, triggered_by_run_id=first.id)
+
+    assert run.step_id is None
+    assert run.workflow_definition_id == "flow"
+    (event,) = _run_events(conn, task.id, run.id)
+    assert event.payload["skill"] == "research"
+    assert "step_id" not in event.payload
+
+
+# create_run: rejections -- each proves nothing was written
+
+
+def test_create_run_rejects_a_duplicate_running_run(conn):
+    workflow, task = _bound_task(conn)
+    create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    events_before = len(_rows(conn, "lifecycle_events"))
+
+    with pytest.raises(store.InvariantViolationError, match="already has a running"):
+        create_run(conn, task_id=task.id, action=_initial(workflow, task))
+
+    assert len(_rows(conn, "runs")) == 1
+    assert len(_rows(conn, "lifecycle_events")) == events_before
+
+
+def test_create_run_unknown_task_raises_lookup_error(conn):
+    with pytest.raises(LookupError, match="no task"):
+        create_run(
+            conn,
+            task_id="task-missing",
+            action=EvaluationOutput(
+                action=ActionType.RUN, reason="initial", step="first"
+            ),
+        )
+    assert _rows(conn, "runs") == []
+    assert _rows(conn, "lifecycle_events") == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.WAITING_FOR_HUMAN],
+)
+def test_create_run_rejects_a_non_active_task(conn, status):
+    workflow, task = _bound_task(conn)
+    action = _initial(workflow, task)
+    task = _force_status(conn, task, status)
+    events_before = len(_rows(conn, "lifecycle_events"))
+
+    with pytest.raises(RunCreationError, match=status.value):
+        create_run(conn, task_id=task.id, action=action)
+
+    assert _rows(conn, "runs") == []
+    assert len(_rows(conn, "lifecycle_events")) == events_before
+
+
+def test_create_run_rejects_an_unknown_triggering_run(conn):
+    _, task = _bound_task(conn)
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="second")
+    with pytest.raises(RunCreationError, match="names no Run"):
+        create_run(
+            conn, task_id=task.id, action=action, triggered_by_run_id="run-missing"
+        )
+    assert _rows(conn, "runs") == []
+    assert _rows(conn, "lifecycle_events") == _task_events(conn, task.id)
+
+
+def test_create_run_rejects_a_triggering_run_from_another_task(conn):
+    workflow, task_a = _bound_task(conn, title="A")
+    task_b = create_task(conn, title="B", workflow_definition_id="flow")
+    foreign = create_run(conn, task_id=task_a.id, action=_initial(workflow, task_a))
+
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="second")
+    events_before = len(_rows(conn, "lifecycle_events"))
+    with pytest.raises(RunCreationError, match="belongs to task"):
+        create_run(
+            conn, task_id=task_b.id, action=action, triggered_by_run_id=foreign.id
+        )
+
+    assert len(_rows(conn, "runs")) == 1  # only task_a's run
+    assert len(_rows(conn, "lifecycle_events")) == events_before
+
+
+@pytest.mark.parametrize(
+    "bad_action",
+    [
+        EvaluationOutput(action=ActionType.HUMAN, reason="human_required"),
+        EvaluationOutput(action=ActionType.COMPLETE, reason="approved"),
+        EvaluationOutput(action=ActionType.CANCEL, reason="cancel"),
+    ],
+)
+def test_create_run_rejects_a_non_run_action(conn, bad_action):
+    _, task = _bound_task(conn)
+    events_before = len(_rows(conn, "lifecycle_events"))
+    with pytest.raises(ValueError, match="must be 'run'"):
+        create_run(conn, task_id=task.id, action=bad_action)
+    _assert_nothing_written(conn, events=events_before)
+
+
+def test_create_run_rejects_initial_reason_with_a_triggering_run(conn):
+    workflow, task = _bound_task(conn)
+    first = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    _complete(conn, first)
+
+    with pytest.raises(ValueError, match="initial Run must not"):
+        create_run(
+            conn,
+            task_id=task.id,
+            action=_initial(workflow, task),
+            triggered_by_run_id=first.id,
+        )
+    assert len(_rows(conn, "runs")) == 1
+
+
+def test_create_run_rejects_non_initial_reason_without_a_triggering_run(conn):
+    _, task = _bound_task(conn)
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="second")
+    events_before = len(_rows(conn, "lifecycle_events"))
+    with pytest.raises(ValueError, match="non-initial"):
+        create_run(conn, task_id=task.id, action=action)
+    _assert_nothing_written(conn, events=events_before)
+
+
+def test_create_run_rejects_a_step_action_when_task_has_no_workflow(conn):
+    task = create_task(conn, title="Unbound")
+    action = EvaluationOutput(action=ActionType.RUN, reason="initial", step="first")
+    events_before = len(_rows(conn, "lifecycle_events"))
+    with pytest.raises(ValueError, match="no workflow definition"):
+        create_run(conn, task_id=task.id, action=action)
+    _assert_nothing_written(conn, events=events_before)
+
+
+def test_create_run_unknown_task_precedes_the_triggering_run_check(conn):
+    with pytest.raises(LookupError):
+        create_run(
+            conn,
+            task_id="task-missing",
+            action=EvaluationOutput(
+                action=ActionType.RUN, reason="ready", step="second"
+            ),
+            triggered_by_run_id="run-also-missing",
+        )
+
+
+def test_create_run_non_active_task_precedes_the_triggering_run_check(conn):
+    _, task = _bound_task(conn)
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="second")
+    task = _force_status(conn, task, TaskStatus.COMPLETED)
+    with pytest.raises(RunCreationError, match="completed"):
+        create_run(
+            conn, task_id=task.id, action=action, triggered_by_run_id="run-missing"
+        )
+
+
+def test_create_run_action_shape_precedes_the_unknown_task_check(conn):
+    # rules 1-2 (action must be a run EvaluationOutput) beat rule 3 (Task exists).
+    with pytest.raises(ValueError, match="must be 'run'"):
+        create_run(
+            conn,
+            task_id="task-missing",
+            action=EvaluationOutput(action=ActionType.HUMAN, reason="human_required"),
+        )
+
+
+def test_create_run_triggering_run_check_precedes_the_missing_workflow_check(conn):
+    # rule 5 (triggering Run must exist and match) beats rule 6 (step needs a
+    # Workflow): an unbound Task with a step action and a bad triggering Run
+    # surfaces the RunCreationError, not the ValueError.
+    task = create_task(conn, title="Unbound")
+    action = EvaluationOutput(action=ActionType.RUN, reason="ready", step="first")
+    with pytest.raises(RunCreationError, match="names no Run"):
+        create_run(
+            conn, task_id=task.id, action=action, triggered_by_run_id="run-missing"
+        )
+
+
+# create_run: atomicity
+
+
+def test_create_run_and_event_are_one_transaction(conn, monkeypatch):
+    workflow, task = _bound_task(conn)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("event write failed")
+
+    monkeypatch.setattr(service.store, "insert_lifecycle_event", boom)
+    with pytest.raises(RuntimeError, match="event write failed"):
+        create_run(conn, task_id=task.id, action=_initial(workflow, task))
+
+    assert _rows(conn, "runs") == []
+
+
+# create_run: vertical slice over the real reference workflow
+
+
+def test_vertical_slice_initial_then_subsequent_run(conn):
+    workflow = load_workflow(REFERENCE)
+    register_workflow(conn, workflow)
+    task = create_task(conn, title="Ship it", workflow_definition_id="software-change")
+
+    first_action = resolve_initial_action(task, workflow)
+    first = create_run(conn, task_id=task.id, action=first_action)
+    assert first.step_id == "requirements"
+    assert first.trigger_reason == "initial"
+    assert first.triggered_by_run_id is None
+
+    first = _complete(conn, first)
+    result = Result(
+        id="result-1",
+        run_id=first.id,
+        status=ResultStatus.COMPLETED,
+        created_at=first.completed_at,
+        outcome=Outcome(type="requirements", decision="ready"),
+    )
+    with conn:
+        store.insert_result(conn, result)
+
+    second_action = evaluate(
+        EvaluationInput(
+            task=task,
+            workflow=workflow,
+            current_run=first,
+            result=result,
+        )
+    )
+    second = create_run(
+        conn, task_id=task.id, action=second_action, triggered_by_run_id=first.id
+    )
+    assert second.step_id == "decomposition"
+    assert second.trigger_reason == "ready"
+    assert second.triggered_by_run_id == first.id
