@@ -27,8 +27,9 @@ Two boundaries:
   no field that could carry it -- instead of a downstream convention.
   :class:`~skillflow.context.ContextSelection` *is* held whole: it is an existing
   abstraction carrying exactly the right data (declaration-ordered entries,
-  ``.artifacts``, and the ``.unresolved`` diagnostic ``resolve-task`` reports),
-  and flattening it would force the caller to run ``select_context`` twice.
+  ``.artifacts``, and the ``.unresolved`` diagnostic a caller cannot cheaply
+  recompute), and flattening it would force the caller to run ``select_context``
+  twice.
   Artifacts stay metadata references (SF-A-5 §4.8's ``context.artifacts:
   [artifact_reference]``); content is never inlined.
 * **No I/O, no LLM.** This module imports ``dataclasses``, ``collections.abc``
