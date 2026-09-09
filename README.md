@@ -70,6 +70,8 @@ Skill Flow does not automatically launch Claude Code in the MVP.
 /skillflow:decide <decision>
 ```
 
+Operating rules for these commands: [`docs/operational-protocol.md`](docs/operational-protocol.md).
+
 ## Design principles
 
 - Claude Code remains the execution layer.
