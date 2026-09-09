@@ -34,6 +34,11 @@ consumes an already-canonical ``Result``; validating the command input that
 out of scope here -- validating a decision against ``step.decisions`` is
 ``/skillflow:decide``'s contract (SF-A-5 §7.5), so ``step.decisions`` is never
 consulted.
+
+:func:`validate_outcome` reads only ``CompletionRequest.decision``.
+``CompletionRequest.artifacts`` is carried for ``complete-run`` (SF-23), which
+registers the reported durable outputs in the same atomic unit -- and is
+ignored here.
 """
 
 from dataclasses import dataclass
@@ -41,7 +46,12 @@ from dataclasses import dataclass
 from skillflow.domain import Outcome
 from skillflow.workflow import WorkflowStep
 
-__all__ = ["CompletionError", "CompletionRequest", "validate_outcome"]
+__all__ = [
+    "ArtifactSubmission",
+    "CompletionError",
+    "CompletionRequest",
+    "validate_outcome",
+]
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -76,6 +86,30 @@ class CompletionError(Exception):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class ArtifactSubmission:
+    """One durable output Claude reports at completion (SF-A-5 §5.5/§6.2).
+
+    ``content`` is the artifact body in memory, matching
+    ``artifacts.create_artifact``'s parameter: reading a working-tree file is
+    the caller's concern, so this module keeps its no-I/O boundary.
+    """
+
+    name: str
+    type: str
+    content: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "name", _require_text(self.name, "ArtifactSubmission.name")
+        )
+        object.__setattr__(
+            self, "type", _require_text(self.type, "ArtifactSubmission.type")
+        )
+        if not isinstance(self.content, str):
+            raise ValueError("ArtifactSubmission.content must be a string")
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class CompletionRequest:
     """What Claude reports at ``/skillflow:complete-run`` (SF-A-5 §6.2).
 
@@ -83,9 +117,15 @@ class CompletionRequest:
     a key of the current step's ``outcomes`` mapping. ``None`` means "this
     Run reports no lifecycle outcome", legal only on a step that declares
     none.
+
+    ``artifacts`` are the durable outputs the Run produced, carried here so
+    ``complete-run`` takes one value object. Two submissions under one name
+    in a single completion is a caller error, not a version chain, and is
+    rejected.
     """
 
     decision: str | None = None
+    artifacts: tuple[ArtifactSubmission, ...] = ()
 
     def __post_init__(self) -> None:
         if self.decision is not None:
@@ -94,6 +134,23 @@ class CompletionRequest:
                 "decision",
                 _require_text(self.decision, "CompletionRequest.decision"),
             )
+        if isinstance(self.artifacts, str):
+            raise ValueError("CompletionRequest.artifacts must be an iterable")
+        try:
+            submissions = tuple(self.artifacts)
+        except TypeError:
+            raise ValueError(
+                "CompletionRequest.artifacts must be an iterable"
+            ) from None
+        for submission in submissions:
+            if not isinstance(submission, ArtifactSubmission):
+                raise ValueError(
+                    "CompletionRequest.artifacts must contain ArtifactSubmission"
+                )
+        names = [submission.name for submission in submissions]
+        if len(set(names)) != len(names):
+            raise ValueError("CompletionRequest.artifacts has a duplicate name")
+        object.__setattr__(self, "artifacts", submissions)
 
 
 def validate_outcome(

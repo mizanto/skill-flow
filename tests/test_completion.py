@@ -22,6 +22,7 @@ import pytest
 
 from skillflow import completion, domain
 from skillflow.completion import (
+    ArtifactSubmission,
     CompletionError,
     CompletionRequest,
     validate_outcome,
@@ -75,11 +76,12 @@ def test_module_defines_exactly_the_v0_dataclasses():
         and not name.startswith("_")
         and getattr(value, "__module__", None) == completion.__name__
     }
-    assert defined == {"CompletionRequest"}
+    assert defined == {"ArtifactSubmission", "CompletionRequest"}
 
 
 def test_all_matches_the_public_surface():
     assert set(completion.__all__) == {
+        "ArtifactSubmission",
         "CompletionError",
         "CompletionRequest",
         "validate_outcome",
@@ -87,15 +89,27 @@ def test_all_matches_the_public_surface():
 
 
 def test_entity_fields_match_spec():
-    assert {f.name for f in dataclasses.fields(CompletionRequest)} == {"decision"}
+    assert {f.name for f in dataclasses.fields(CompletionRequest)} == {
+        "decision",
+        "artifacts",
+    }
+    assert {f.name for f in dataclasses.fields(ArtifactSubmission)} == {
+        "name",
+        "type",
+        "content",
+    }
 
 
-def test_dataclass_is_frozen_slotted_keyword_only():
-    params = CompletionRequest.__dataclass_params__
+@pytest.mark.parametrize("entity", [ArtifactSubmission, CompletionRequest])
+def test_dataclasses_are_frozen_slotted_keyword_only(entity):
+    params = entity.__dataclass_params__
     assert params.frozen and params.kw_only
-    instance = CompletionRequest()
+    if entity is ArtifactSubmission:
+        instance = ArtifactSubmission(name="n", type="t", content="c")
+    else:
+        instance = CompletionRequest()
     assert not hasattr(instance, "__dict__")
-    field_name = next(iter(dataclasses.fields(CompletionRequest))).name
+    field_name = next(iter(dataclasses.fields(entity))).name
     with pytest.raises(dataclasses.FrozenInstanceError):
         setattr(instance, field_name, "approved")
 
@@ -332,3 +346,77 @@ def test_validated_outcome_evaluates_on_the_same_step():
         )
         assert out.action is rule.action
         assert out.reason == key
+
+
+# --- behaviour: ArtifactSubmission and CompletionRequest.artifacts (SF-23) ----
+
+
+def test_submission_strips_name_and_type():
+    submission = ArtifactSubmission(
+        name="  review.md  ", type="  review  ", content="x"
+    )
+    assert (submission.name, submission.type) == ("review.md", "review")
+
+
+@pytest.mark.parametrize("field", ["name", "type"])
+@pytest.mark.parametrize("bad", ["", "   ", 123, ["x"]])
+def test_submission_rejects_blank_or_non_string_name_and_type(field, bad):
+    with pytest.raises(ValueError):
+        ArtifactSubmission(**{"name": "n", "type": "t", "content": "c", field: bad})
+
+
+@pytest.mark.parametrize("bad", [123, ["x"], None, b"bytes"])
+def test_submission_rejects_non_string_content(bad):
+    with pytest.raises(ValueError):
+        ArtifactSubmission(name="n", type="t", content=bad)
+
+
+def test_submission_accepts_empty_content():
+    assert ArtifactSubmission(name="n", type="t", content="").content == ""
+
+
+def test_request_artifacts_default_to_empty_tuple():
+    assert CompletionRequest().artifacts == ()
+
+
+def test_request_artifacts_list_is_coerced_to_tuple():
+    submission = ArtifactSubmission(name="n", type="t", content="c")
+    request = CompletionRequest(artifacts=[submission])
+    assert request.artifacts == (submission,)
+
+
+@pytest.mark.parametrize("bad", ["review.md", 123, None])
+def test_request_artifacts_rejects_str_and_non_iterable(bad):
+    with pytest.raises(ValueError):
+        CompletionRequest(artifacts=bad)
+
+
+def test_request_artifacts_rejects_non_submission_element():
+    with pytest.raises(ValueError):
+        CompletionRequest(artifacts=("review.md",))
+
+
+def test_request_artifacts_rejects_duplicate_names():
+    with pytest.raises(ValueError, match="duplicate name"):
+        CompletionRequest(
+            artifacts=(
+                ArtifactSubmission(name="n", type="a", content="c"),
+                ArtifactSubmission(name="n", type="b", content="c"),
+            )
+        )
+
+
+def test_validate_outcome_ignores_artifacts():
+    submission = ArtifactSubmission(name="review.md", type="review", content="c")
+    step = _step()
+    assert validate_outcome(
+        step=step,
+        request=CompletionRequest(decision="approved", artifacts=(submission,)),
+    ) == validate_outcome(step=step, request=CompletionRequest(decision="approved"))
+    assert (
+        validate_outcome(
+            step=_bare_step(),
+            request=CompletionRequest(artifacts=(submission,)),
+        )
+        is None
+    )

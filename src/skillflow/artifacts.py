@@ -63,6 +63,7 @@ __all__ = [
     "create_artifact",
     "content_path",
     "read_content",
+    "register_artifact",
 ]
 
 
@@ -167,7 +168,7 @@ def _write_new_file(path: Path, content: str) -> None:
         ) from exc
 
 
-def create_artifact(
+def register_artifact(
     conn: sqlite3.Connection,
     workspace: Workspace,
     *,
@@ -175,25 +176,22 @@ def create_artifact(
     name: str,
     type: str,
     content: str,
-) -> Artifact:
-    """Create a new immutable Artifact version: content on disk, metadata in SQLite.
+) -> tuple[Artifact, Path]:
+    """Register a new immutable Artifact version without committing.
 
-    Addressed by ``run_id``; ``task_id`` is derived from the Run, which makes
-    "Artifacts link to Runs" structural and the cross-parent invariant
-    unreachable by construction. If the Task already has an Artifact under
-    ``name``, this is the next version of that chain: ``version`` is the
-    previous one plus one and ``supersedes_id`` names it. Nothing about the
-    previous row or the previous file is touched.
+    Everything :func:`create_artifact` does except the transaction: insert the
+    metadata row and the ``artifact.created`` event, and write the content
+    file. Returns the Artifact and the path written.
 
-    The Run's status is deliberately not checked: SF-A-2 §9 keeps artifacts from
-    failed Runs, and ``complete-run`` registers artifacts while the Run is still
-    ``running``.
+    The caller owns the transaction and the orphan-file cleanup: if the
+    caller's commit fails after this returns, it must unlink the returned
+    path. ``store.latest_artifact`` reads through the same connection, so
+    several calls in one uncommitted block still version correctly.
 
     Raises ``LookupError`` for an unknown ``run_id``, ``ValueError`` for a name
     that is not a plain filename, a non-string ``content``, a blank ``type``, or
     a ``type`` that contradicts the existing chain, and
-    :class:`ArtifactStorageError` if the content file cannot be written. Every
-    rejection leaves both stores unchanged.
+    :class:`ArtifactStorageError` if the content file cannot be written.
     """
     name = _artifact_name(name)
     if not isinstance(content, str):
@@ -251,17 +249,58 @@ def create_artifact(
             f"could not create artifact directory {path.parent}: {exc}"
         ) from exc
 
-    wrote = False
+    store.insert_artifact(conn, artifact)
+    store.insert_lifecycle_event(conn, event)
+    _write_new_file(path, content)
+    return artifact, path
+
+
+def create_artifact(
+    conn: sqlite3.Connection,
+    workspace: Workspace,
+    *,
+    run_id: str,
+    name: str,
+    type: str,
+    content: str,
+) -> Artifact:
+    """Create a new immutable Artifact version: content on disk, metadata in SQLite.
+
+    Addressed by ``run_id``; ``task_id`` is derived from the Run, which makes
+    "Artifacts link to Runs" structural and the cross-parent invariant
+    unreachable by construction. If the Task already has an Artifact under
+    ``name``, this is the next version of that chain: ``version`` is the
+    previous one plus one and ``supersedes_id`` names it. Nothing about the
+    previous row or the previous file is touched.
+
+    The Run's status is deliberately not checked: SF-A-2 §9 keeps artifacts from
+    failed Runs, and ``complete-run`` registers artifacts while the Run is still
+    ``running``.
+
+    A single-artifact wrapper around :func:`register_artifact`: one transaction
+    that commits at block exit, with orphan-file cleanup if the commit fails.
+
+    Raises ``LookupError`` for an unknown ``run_id``, ``ValueError`` for a name
+    that is not a plain filename, a non-string ``content``, a blank ``type``, or
+    a ``type`` that contradicts the existing chain, and
+    :class:`ArtifactStorageError` if the content file cannot be written. Every
+    rejection leaves both stores unchanged.
+    """
+    written: Path | None = None
     try:
         with conn:  # commits at block exit; rolls back on exception
-            store.insert_artifact(conn, artifact)
-            store.insert_lifecycle_event(conn, event)
-            _write_new_file(path, content)
-            wrote = True
+            artifact, written = register_artifact(
+                conn,
+                workspace,
+                run_id=run_id,
+                name=name,
+                type=type,
+                content=content,
+            )
     except BaseException:
-        if wrote:
+        if written is not None:
             # The write succeeded but the commit did not: drop the orphan file.
-            path.unlink(missing_ok=True)
+            written.unlink(missing_ok=True)
         raise
     return artifact
 

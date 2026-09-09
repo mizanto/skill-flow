@@ -26,6 +26,7 @@ from skillflow.artifacts import (
     content_path,
     create_artifact,
     read_content,
+    register_artifact,
 )
 from skillflow.domain import LifecycleEventType
 from skillflow.service import create_task
@@ -106,7 +107,46 @@ def test_public_surface():
         "create_artifact",
         "content_path",
         "read_content",
+        "register_artifact",
     }
+
+
+def test_register_artifact_does_not_commit(conn, ws):
+    task_id, run_id = _seed_task_run(conn)
+    path = None
+    try:
+        with pytest.raises(RuntimeError, match="rollback"):
+            with conn:
+                artifact, path = register_artifact(
+                    conn,
+                    ws,
+                    run_id=run_id,
+                    name="plan.md",
+                    type="plan",
+                    content="# Plan",
+                )
+                assert len(store.list_artifacts_for_run(conn, run_id)) == 1
+                raise RuntimeError("rollback")
+        assert store.list_artifacts_for_run(conn, run_id) == []
+        assert path.exists()
+    finally:
+        # The proof deliberately leaves the orphan file behind; the caller
+        # owning cleanup is the documented contract.
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+
+def test_register_artifact_versions_within_one_transaction(conn, ws):
+    task_id, run_id = _seed_task_run(conn)
+    with conn:
+        first, _ = register_artifact(
+            conn, ws, run_id=run_id, name="plan.md", type="plan", content="v1"
+        )
+        second, _ = register_artifact(
+            conn, ws, run_id=run_id, name="plan.md", type="plan", content="v2"
+        )
+    assert (first.version, second.version) == (1, 2)
+    assert second.supersedes_id == first.id
 
 
 def _imported_modules() -> set[str]:
