@@ -382,7 +382,7 @@ status, including terminal Tasks, and without any events present:
 statuses always come from domain rows, never from event replay (SF-A-2
 §1).
 
-It is a CLI-only operator command like `fail-run`: there is no
-`/skillflow:show-task` skill. The only rejection is `TaskNotFound`
+It is a CLI-only operator command like `fail-run`: there is
+deliberately no corresponding skill. The only rejection is `TaskNotFound`
 (check the id).
 

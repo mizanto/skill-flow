@@ -81,6 +81,27 @@ claude plugin validate ./plugins/skillflow
 claude --plugin-dir ./plugins/skillflow
 ```
 
+The runtime also ships two CLI-only operator commands with no skill:
+`skillflow fail-run` (record the running Run as failed) and
+`skillflow show-task <task-id>` (read-only lifecycle view).
+
+New here? Start with the [user guide](docs/user-guide.md) and the
+[reference example](docs/reference-example.md).
+
+## Installation
+
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.14 or newer.
+From a checkout:
+
+```bash
+uv sync
+export PATH="$PWD/.venv/bin:$PATH"
+skillflow --version
+```
+
+`uv sync` needs the package index once; afterwards the CLI never needs
+the network. Keep `skillflow` on `PATH`: the plugin shells out to it.
+
 ## Design principles
 
 - Claude Code remains the execution layer.
@@ -155,6 +176,9 @@ This repository ignores it while SkillFlow dogfoods itself.
 
 ## Status
 
-🚧 **Early development**
+✅ **MVP implemented**
 
-The architecture and MVP specification are being validated before implementation.
+The core loop (resolve → work → prepare → complete → evaluate → next
+Run), human decisions, failure handling, and the reference
+software-change Workflow are implemented and covered end to end. Run it
+yourself with the [user guide](docs/user-guide.md).
