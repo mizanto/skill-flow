@@ -1,0 +1,5 @@
+{
+  "name": "skillflow",
+  "description": "Lifecycle orchestration for independent Claude Code runs: resolve a Task into a bounded Run, prepare durable artifacts, complete the Run, and record human decisions.",
+  "version": "0.1.0"
+}

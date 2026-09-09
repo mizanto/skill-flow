@@ -72,6 +72,15 @@ Skill Flow does not automatically launch Claude Code in the MVP.
 
 Operating rules for these commands: [`docs/operational-protocol.md`](docs/operational-protocol.md).
 
+They ship as a Claude Code plugin at [`plugins/skillflow/`](plugins/skillflow/).
+Each command instructs Claude to run exactly one `skillflow` subcommand, so
+the CLI must be on PATH (see Development below). Validate and try it locally:
+
+```bash
+claude plugin validate ./plugins/skillflow
+claude --plugin-dir ./plugins/skillflow
+```
+
 ## Design principles
 
 - Claude Code remains the execution layer.
