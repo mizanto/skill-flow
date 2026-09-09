@@ -103,6 +103,30 @@ def _result(conn, run, *, decision, type="requirements"):
     return result
 
 
+def _fail(conn, run):
+    failed = replace(
+        run,
+        status=RunStatus.FAILED,
+        completed_at=run.started_at + timedelta(seconds=1),
+    )
+    with conn:
+        store.update_run(conn, failed)
+    return store.get_run(conn, run.id)
+
+
+def _failed_result(conn, run):
+    result = Result(
+        id=f"result-{run.id}",
+        run_id=run.id,
+        status=ResultStatus.FAILED,
+        created_at=run.completed_at,
+        outcome=None,
+    )
+    with conn:
+        store.insert_result(conn, result)
+    return result
+
+
 def _artifact(conn, ws, run, *, name, type):
     return create_artifact(
         conn, ws, run_id=run.id, name=name, type=type, content=f"{name} content"
@@ -230,9 +254,7 @@ def test_task_status_takes_precedence_over_active_run(conn, ws, workflows):
     # A cancelled Task that also has a running Run reports the Task status
     # first (pipeline order §3: step 2 before step 3).
     workflow, task = _assigned(conn)
-    create_run(
-        conn, task_id=task.id, action=resolve_initial_action(task, workflow)
-    )
+    create_run(conn, task_id=task.id, action=resolve_initial_action(task, workflow))
     _set_status(conn, task, TaskStatus.CANCELLED)
     with pytest.raises(ResolveTaskError) as exc_info:
         resolve(conn, ws, task_id=task.id)
@@ -307,9 +329,7 @@ def test_workflow_equal_to_assignment_is_idempotent(conn, ws, workflows):
     events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
     run_input = resolve(conn, ws, task_id=task.id, workflow="software-change")
     # No second assignment event: only the run.created event was added.
-    assert (
-        len(store.list_lifecycle_events_for_task(conn, task.id)) == events_before + 1
-    )
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == events_before + 1
     assert run_input.step_id == "requirements"
 
 
@@ -363,9 +383,7 @@ def test_initial_run_input_projection(conn, ws, workflows):
     assert run_input.skill == "requirements-analysis"
     assert run_input.model == "opus"
     assert run_input.effort == "high"
-    assert [(o.type, o.required) for o in run_input.outputs] == [
-        ("requirements", True)
-    ]
+    assert [(o.type, o.required) for o in run_input.outputs] == [("requirements", True)]
     assert run_input.context.artifacts == ()
     assert run_input.instructions is None
 
@@ -515,9 +533,7 @@ def test_terminal_action_is_rejected_without_a_write(conn, ws, workflows):
     assert len(store.list_runs_for_task(conn, task.id)) == 4
 
 
-def test_outcome_less_step_completion_is_rejected_without_a_write(
-    conn, ws, workflows
-):
+def test_outcome_less_step_completion_is_rejected_without_a_write(conn, ws, workflows):
     # SF-22: a step declaring no outcome rules is terminal -- completing its
     # Run without an outcome resolves to `complete`, so resolve-task raises
     # NoLifecycleAction (previously EvaluationError propagated).
@@ -628,8 +644,10 @@ def test_resolve_after_skill_targeting_skill_outcome_rejected(conn, ws, workflow
     assert len(store.list_runs_for_task(conn, task.id)) == 5
 
 
-@pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.CANCELLED])
+@pytest.mark.parametrize("status", [RunStatus.CANCELLED])
 def test_non_completed_latest_run_is_rejected(conn, ws, workflows, status):
+    # SF-35 narrowed this: a `failed` latest Run advances the lifecycle (a
+    # retry), so only other non-completed states are rejected here.
     _, task = _assigned(conn)
     first = resolve(conn, ws, task_id=task.id).run_id
     run = store.get_run(conn, first)
@@ -641,6 +659,105 @@ def test_non_completed_latest_run_is_rejected(conn, ws, workflows, status):
     with pytest.raises(ResolveTaskError) as exc_info:
         resolve(conn, ws, task_id=task.id)
     assert exc_info.value.code == "RunNotCompleted"
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
+def test_resolve_after_failed_step_run_retries_the_same_step(conn, ws, workflows):
+    # SF-35: the failed assignment is re-issued as a new Run. The retry's
+    # provenance names the failed Run with reason `run_failed`, and its
+    # context resolves the failed Run's partial artifacts (SF-A-2 §9).
+    _, task = _assigned(conn)
+    first = resolve(conn, ws, task_id=task.id).run_id
+    run = store.get_run(conn, first)
+    _artifact(conn, ws, run, name="requirements.md", type="requirements")
+    _result(conn, _complete(conn, run), decision="ready", type="requirements")
+    second = resolve(conn, ws, task_id=task.id).run_id
+    run = store.get_run(conn, second)
+    _artifact(conn, ws, run, name="plan.md", type="plan")
+    _result(conn, _complete(conn, run), decision="ready", type="decomposition")
+    third = resolve(conn, ws, task_id=task.id).run_id
+    failed = store.get_run(conn, third)
+    assert failed.step_id == "implementation"
+    revised = _artifact(conn, ws, failed, name="plan.md", type="plan")
+    _failed_result(conn, _fail(conn, failed))
+
+    retry_input = resolve(conn, ws, task_id=task.id)
+
+    assert retry_input.step_id == "implementation"
+    assert retry_input.run_id != failed.id
+    retry = store.get_run(conn, retry_input.run_id)
+    assert retry.status is RunStatus.RUNNING
+    assert retry.triggered_by_run_id == failed.id
+    assert retry.trigger_reason == "run_failed"
+    by_type = {a.type: a for a in retry_input.context.artifacts}
+    assert set(by_type) == {"requirements", "plan"}
+    assert by_type["plan"].id == revised.id
+    assert by_type["plan"].run_id == failed.id
+    assert store.get_task(conn, task.id).status is TaskStatus.ACTIVE
+    assert len(store.list_runs_for_task(conn, task.id)) == 4
+
+
+def test_resolve_after_failed_skill_run_retries_the_skill(conn, ws, workflows):
+    _, task = _assigned(conn)
+    review = _drive_to_review(conn, ws, task)
+    _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+    skill_input = resolve(conn, ws, task_id=task.id)
+    assert skill_input.step_id is None
+    assert skill_input.skill == "research"
+    failed = _fail(conn, store.get_run(conn, skill_input.run_id))
+    _failed_result(conn, failed)
+
+    retry_input = resolve(conn, ws, task_id=task.id)
+
+    assert retry_input.step_id is None
+    assert retry_input.skill == "research"
+    assert retry_input.run_id != failed.id
+    retry = store.get_run(conn, retry_input.run_id)
+    assert retry.triggered_by_run_id == failed.id
+    assert retry.trigger_reason == "run_failed"
+
+
+def test_failed_skill_run_without_payload_skill_is_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    review = _drive_to_review(conn, ws, task)
+    _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+    skill_input = resolve(conn, ws, task_id=task.id)
+    failed = _fail(conn, store.get_run(conn, skill_input.run_id))
+    _failed_result(conn, failed)
+    with conn:
+        conn.execute(
+            "DELETE FROM lifecycle_events WHERE run_id = ? AND type = ?",
+            (failed.id, "run.created"),
+        )
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "StepUnresolved"
+    assert "run.created" in str(exc_info.value)
+    assert len(store.list_runs_for_task(conn, task.id)) == 5
+
+
+def test_failed_run_without_result_is_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    first = resolve(conn, ws, task_id=task.id).run_id
+    _fail(conn, store.get_run(conn, first))
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "ResultMissing"
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
+def test_failed_run_naming_an_absent_step_is_rejected(conn, ws, workflows):
+    # The definition changed under a live Task: the failed Run's step is
+    # gone, so the retry has no target.
+    _, task = _assigned(conn)
+    stray = create_run(
+        conn,
+        task_id=task.id,
+        action=EvaluationOutput(action=ActionType.RUN, reason="initial", step="gone"),
+    )
+    _failed_result(conn, _fail(conn, stray))
+    with pytest.raises(EvaluationError):
+        resolve(conn, ws, task_id=task.id)
     assert len(store.list_runs_for_task(conn, task.id)) == 1
 
 
@@ -687,9 +804,7 @@ def test_tampered_workflow_id_fails_before_evaluation(conn, ws, workflows):
         conn, Workflow(name="other-id", steps=(WorkflowStep(id="only", skill="s"),))
     )
     with conn:
-        store.update_task(
-            conn, replace(task, workflow_definition_id="other-id")
-        )
+        store.update_task(conn, replace(task, workflow_definition_id="other-id"))
     with pytest.raises(WorkflowLoadError) as exc_info:
         resolve(conn, ws, task_id=task.id)
     assert "other-id" in str(exc_info.value)

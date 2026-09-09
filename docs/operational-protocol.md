@@ -99,6 +99,10 @@ SF-A-3 §6).
   new session (SF-A-5 §3.2).
 - A failed Run does not fail the Task (SF-A-5 §3.6); reporting a
   failure never means abandoning the Task.
+- After a failed Run, start the retry with rule 1 as usual: it resolves
+  to the same step (or skill) as a clean assignment. The retry never
+  receives the failure diagnostics automatically (SF-A-5 §3.4); only
+  declared durable artifacts carry over.
 
 ## Rule 3 — Prepare artifacts before completing
 
@@ -151,6 +155,12 @@ Finish the Run with `/skillflow:complete-run`. When the Task is
 - Must not: complete a Run that is not `running` (`RunNotFound` /
   `RunNotActive`); only `running → completed` is allowed (SF-A-5
   §6.3).
+- Must not: complete failed work as successful. When the Run cannot be
+  completed at all, record it with `skillflow fail-run --task <task-id>
+  [--message <text>] [--artifact …]` instead: the Run becomes `failed`
+  with a failed Result, diagnostics land in `runs/<run-id>/output.log`,
+  partial outputs are registered for the retry (SF-A-2 §9), and the Task
+  stays `active`.
 - On any validation failure (missing artifacts, invalid outcome,
   unexpected decision) the Run stays `running` — or the Task stays
   `waiting_for_human` — with no Result created and no evaluation

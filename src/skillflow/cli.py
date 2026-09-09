@@ -1,7 +1,8 @@
 """Command-line entry point for SkillFlow.
 
 ``--version`` / ``--help`` plus the lifecycle subcommands (``resolve-task``,
-``prepare-artifacts``, ``complete-run`` and ``decide``).
+``prepare-artifacts``, ``complete-run``, ``decide`` and the ``fail-run``
+operator command).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition/input rejection
 (the message goes to stderr), ``2`` for usage errors (argparse's own).
@@ -27,6 +28,7 @@ from skillflow.decide import DecideError, DecisionRecord, decide
 from skillflow.decisions import DecisionError, DecisionRequest
 from skillflow.domain import Run, RunStatus
 from skillflow.evaluator import EvaluationError, WorkflowSelectionRequiredError
+from skillflow.fail_run import FailRunError, FailureRequest, RunFailure, fail_run
 from skillflow.prepare_artifacts import (
     ArtifactReport,
     PrepareArtifactsError,
@@ -115,6 +117,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--comment",
         default=None,
         help="Optional free-text comment stored with the decision.",
+    )
+    fail_parser = subparsers.add_parser(
+        "fail-run",
+        help="Record the current running Run as failed, with diagnostics.",
+    )
+    fail_parser.add_argument(
+        "--task",
+        default=None,
+        dest="task",
+        help="Task id, when more than one Run is running in this workspace.",
+    )
+    diagnostics = fail_parser.add_mutually_exclusive_group()
+    diagnostics.add_argument(
+        "--message",
+        default=None,
+        help="Inline failure diagnostics text, stored as output.log.",
+    )
+    diagnostics.add_argument(
+        "--diagnostics-file",
+        default=None,
+        metavar="PATH",
+        help="File whose UTF-8 content is stored as output.log.",
+    )
+    fail_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        metavar="NAME:TYPE:PATH",
+        help="Partial durable output submission; PATH is read as UTF-8. Repeatable.",
     )
     return parser
 
@@ -341,6 +372,44 @@ def format_decision(record: DecisionRecord) -> str:
     return "\n".join(lines)
 
 
+def format_failure(failure: RunFailure) -> str:
+    """Render a ``RunFailure`` as human-readable text.
+
+    Pure formatting: the failed Run, the unchanged Task status (a failed Run
+    never fails the Task, SF-A-5 §3.6), the diagnostics path when captured,
+    and the evaluated retry action -- always ``run``, so this is
+    straight-line on that invariant (the failed rule returns ``run`` by
+    construction). A ``run`` action targeting a step prints the next step
+    with the ``/skillflow:resolve-task`` pointer for a new Claude Code
+    session; targeting only a skill prints the skill and reason with the
+    same pointer -- both mirroring :func:`format_completion`. No lifecycle
+    state is re-derived here.
+    """
+    lines = [f"Run {failure.run.id} failed.", ""]
+    lines.append("Task status:")
+    lines.append(failure.task.status.value)
+    lines.append("")
+    if failure.diagnostics_path is not None:
+        lines.append(f"Diagnostics: {failure.diagnostics_path}")
+        lines.append("")
+    action = failure.action
+    if action.action is not ActionType.RUN:
+        raise ValueError(
+            f"cannot format a {action.action.value!r} failure action; a failed "
+            "Run always retries as 'run' (SF-35)"
+        )
+    lines.append("Next action:")
+    if action.step is not None:
+        lines.append(f"Run {action.step}.")
+    else:
+        lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
+    lines.append("")
+    lines.append("Start the next Run in a new Claude Code session:")
+    lines.append("")
+    lines.append(f"/skillflow:resolve-task {failure.task.id}")
+    return "\n".join(lines)
+
+
 def _run_prepare_artifacts(*, task_id: str | None) -> int:
     """Execute ``prepare-artifacts``; return a process exit code."""
     try:
@@ -425,93 +494,151 @@ def _resolve_current_run(conn: sqlite3.Connection, task_id: str | None) -> Run:
     return run
 
 
-def _check_submission_name(*, name: str, spec: str) -> None:
+def _check_submission_name(
+    *,
+    name: str,
+    spec: str,
+    error_cls: type[CompleteRunError] | type[FailRunError] = CompleteRunError,
+    rerun: str = "`/skillflow:complete-run`",
+) -> None:
     """Reject ``name`` unless it is a plain filename.
 
     Mirrors ``artifacts._artifact_name``'s rule (see ``_FORBIDDEN_IN_NAME``):
     separator-free, no drive letter, not a directory entry. Surrounding
     whitespace is already stripped by the caller, matching the service.
+    ``error_cls``/``rerun`` let ``fail-run`` share this loader: the rejection
+    code is the same (``"InvalidArtifactSubmission"``), only the carrying
+    class and the rerun hint differ.
     """
     if (
         name in {".", ".."}
         or any(char in name for char in _FORBIDDEN_IN_NAME)
         or PureWindowsPath(name).drive
     ):
-        raise CompleteRunError(
+        raise error_cls(
             "InvalidArtifactSubmission",
             f"--artifact {spec!r} names {name!r}, which is not a plain "
             "filename (no directories, separators, or drive letters); fix "
-            "the NAME part of NAME:TYPE:PATH, then re-run "
-            "`/skillflow:complete-run`",
+            f"the NAME part of NAME:TYPE:PATH, then re-run {rerun}",
         )
 
 
 def _load_submissions(
-    conn: sqlite3.Connection, run: Run, specs: list[str]
+    conn: sqlite3.Connection,
+    run: Run | None,
+    specs: list[str],
+    *,
+    error_cls: type[CompleteRunError] | type[FailRunError] = CompleteRunError,
+    rerun: str = "`/skillflow:complete-run`",
 ) -> list[ArtifactSubmission]:
     """Read ``--artifact NAME:TYPE:PATH`` specs into submissions.
 
     For each spec, in order: split into three non-empty parts (surrounding
     whitespace stripped, matching the service's stripping, so duplicate and
     chain checks agree with it), read PATH as UTF-8, reject non-filename
-    names; then reject duplicate names and names whose established chain type
-    differs (``store.latest_artifact`` is a read). Every failure raises
-    :class:`CompleteRunError` with code ``"InvalidArtifactSubmission"`` -- a
-    v0 CLI refinement in the ``OutcomeRequired`` / ``OutcomeNotExpected``
-    tradition, since SF-A-5 §6.2 leaves transport to the implementation.
-    Reads only: no row, event, or content file is written here.
+    names; then reject duplicate names and -- when ``run`` is given -- names
+    whose established chain type differs (``store.latest_artifact`` is a
+    read). Every failure raises ``error_cls`` with code
+    ``"InvalidArtifactSubmission"`` -- a v0 CLI refinement in the
+    ``OutcomeRequired`` / ``OutcomeNotExpected`` tradition, since SF-A-5 §6.2
+    leaves transport to the implementation; ``fail-run`` shares the loader
+    with ``FailRunError`` and its own rerun hint, passing ``run=None``
+    because the Run resolves inside the operation, which performs the chain
+    pre-check itself. Reads only: no row, event, or content file is written
+    here.
     """
     submissions: list[ArtifactSubmission] = []
     for spec in specs:
         parts = [part.strip() for part in spec.split(":", 2)]
         if len(parts) != 3 or not all(parts):
-            raise CompleteRunError(
+            raise error_cls(
                 "InvalidArtifactSubmission",
                 f"malformed --artifact {spec!r}; expected NAME:TYPE:PATH "
                 "(e.g. `--artifact review.md:review:review.md`), then re-run "
-                "`/skillflow:complete-run`",
+                f"{rerun}",
             )
         name, type_, path = parts
         try:
             content = Path(path).read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            raise CompleteRunError(
+            raise error_cls(
                 "InvalidArtifactSubmission",
                 f"--artifact file {path!r} (submission {name!r}) is not "
                 "valid UTF-8; fix the file, then re-run "
-                "`/skillflow:complete-run`",
+                f"{rerun}",
             ) from None
         except (OSError, ValueError) as exc:
             # ValueError: embedded null byte in the path. UnicodeDecodeError
             # is caught above first (it subclasses ValueError).
-            raise CompleteRunError(
+            raise error_cls(
                 "InvalidArtifactSubmission",
                 f"cannot read --artifact file {path!r} (submission {name!r}): "
                 f"{exc}; create it as an ordinary file, then re-run "
-                "`/skillflow:complete-run`",
+                f"{rerun}",
             ) from None
-        _check_submission_name(name=name, spec=spec)
+        _check_submission_name(name=name, spec=spec, error_cls=error_cls, rerun=rerun)
         submissions.append(ArtifactSubmission(name=name, type=type_, content=content))
     seen: set[str] = set()
     for submission in submissions:
         if submission.name in seen:
-            raise CompleteRunError(
+            raise error_cls(
                 "InvalidArtifactSubmission",
                 f"duplicate --artifact name {submission.name!r}; submit "
-                "each name once, then re-run `/skillflow:complete-run`",
+                f"each name once, then re-run {rerun}",
             )
         seen.add(submission.name)
-    for submission in submissions:
-        previous = store.latest_artifact(conn, run.task_id, submission.name)
-        if previous is not None and previous.type != submission.type:
-            raise CompleteRunError(
-                "InvalidArtifactSubmission",
-                f"artifact {submission.name!r} in task {run.task_id!r} is of "
-                f"type {previous.type!r}; refusing the submission as type "
-                f"{submission.type!r} -- fix the TYPE part of NAME:TYPE:PATH, "
-                "then re-run `/skillflow:complete-run`",
-            )
+    if run is not None:
+        for submission in submissions:
+            previous = store.latest_artifact(conn, run.task_id, submission.name)
+            if previous is not None and previous.type != submission.type:
+                raise error_cls(
+                    "InvalidArtifactSubmission",
+                    f"artifact {submission.name!r} in task {run.task_id!r} is "
+                    f"of type {previous.type!r}; refusing the submission as "
+                    f"type {submission.type!r} -- fix the TYPE part of "
+                    f"NAME:TYPE:PATH, then re-run {rerun}",
+                )
     return submissions
+
+
+def _load_diagnostics(
+    *, message: str | None, diagnostics_file: str | None
+) -> str | None:
+    """Resolve the ``fail-run`` diagnostics flags into file content.
+
+    Returns ``message`` verbatim, the UTF-8 content of ``diagnostics_file``,
+    or ``None`` when neither flag was given. Every failure raises
+    :class:`FailRunError` with code ``"InvalidDiagnostics"`` -- a blank
+    message is neither "absent" (that would reinterpret input) nor valid
+    content. Reads only: the content file is written by the operation, inside
+    its transaction.
+    """
+    if message is not None:
+        if not message.strip():
+            raise FailRunError(
+                "InvalidDiagnostics",
+                "empty --message; omit the flag or pass non-empty "
+                "diagnostics text, then re-run `skillflow fail-run ...`",
+            )
+        return message
+    if diagnostics_file is None:
+        return None
+    try:
+        return Path(diagnostics_file).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise FailRunError(
+            "InvalidDiagnostics",
+            f"--diagnostics-file {diagnostics_file!r} is not valid UTF-8; "
+            "fix the file, then re-run `skillflow fail-run ...`",
+        ) from None
+    except (OSError, ValueError) as exc:
+        # ValueError: embedded null byte in the path. UnicodeDecodeError
+        # is caught above first (it subclasses ValueError).
+        raise FailRunError(
+            "InvalidDiagnostics",
+            f"cannot read --diagnostics-file {diagnostics_file!r}: {exc}; "
+            "fix the path, then re-run `skillflow fail-run ...`",
+        ) from None
 
 
 def _run_resolve_task(*, task_id: str, workflow: str | None) -> int:
@@ -633,6 +760,60 @@ def _run_decide(*, task_id: str | None, decision: str, comment: str | None) -> i
     return 0
 
 
+def _run_fail_run(
+    *,
+    task_id: str | None,
+    message: str | None,
+    diagnostics_file: str | None,
+    artifacts: list[str],
+) -> int:
+    """Execute ``fail-run``; return a process exit code."""
+    try:
+        # Pure flag-shape validation first, before touching the workspace:
+        # diagnostics content is resolved from exactly one source (argparse
+        # already rejects both flags together with exit 2).
+        diagnostics = _load_diagnostics(
+            message=message, diagnostics_file=diagnostics_file
+        )
+        ws = workspace.Workspace(root=workspace.find_repo_root())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            # The Run resolves inside the operation (like `decide`'s Task),
+            # so the submission loader runs without the chain pre-check --
+            # `fail_run` performs it once the Run is known.
+            submissions = _load_submissions(
+                conn,
+                None,
+                artifacts,
+                error_cls=FailRunError,
+                rerun="`skillflow fail-run ...`",
+            )
+            result = fail_run(
+                conn,
+                ws,
+                task_id=task_id,
+                request=FailureRequest(diagnostics=diagnostics, artifacts=submissions),
+            )
+    # Note: LookupError (the service layer's missing-entity convention) is
+    # deliberately not caught: the Task is FK-guaranteed behind the resolved
+    # Run, and a programming error must traceback rather than masquerade as
+    # a lifecycle rejection -- the same stance _run_complete_run documents
+    # for ValueError, which is likewise uncaught here. EvaluationError IS
+    # caught: the failed step may have vanished from the definition, so
+    # unlike a validated completion this evaluation can surface it.
+    except (
+        FailRunError,
+        EvaluationError,
+        WorkflowLoadError,
+        WorkspaceError,
+        ArtifactStorageError,
+        store.InvariantViolationError,
+    ) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(format_failure(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run SkillFlow.
 
@@ -660,6 +841,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "decide":
         return _run_decide(
             task_id=args.task, decision=args.decision, comment=args.comment
+        )
+    if args.command == "fail-run":
+        return _run_fail_run(
+            task_id=args.task,
+            message=args.message,
+            diagnostics_file=args.diagnostics_file,
+            artifacts=args.artifact,
         )
     parser.print_help()
     return 0

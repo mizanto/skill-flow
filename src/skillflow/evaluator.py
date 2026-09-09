@@ -6,7 +6,9 @@ functions over frozen value objects. Each returns one v0 lifecycle action and
 mutates nothing:
 
 * :func:`evaluate` answers *a Run finished, what now?*, mapping the current
-  step's declared outcome/decision rules (SF-A-4 §7) onto an action.
+  step's declared outcome/decision rules (SF-A-4 §7) onto an action. The one
+  exception is a failed Result, which retries the same step or skill without
+  consulting any table (SF-35; see :func:`evaluate` rule 1).
 * :func:`resolve_initial_action` answers *a Task exists and nothing has run yet,
   what first?* (SF-A-5 §4.5) -- the one case :func:`evaluate` cannot, because
   there is no previous Run, no Result, and so no outcome rule to look up. It
@@ -80,6 +82,7 @@ __all__ = [
     "EvaluationInput",
     "EvaluationOutput",
     "REASON_NO_OUTCOME",
+    "REASON_RUN_FAILED",
     "WorkflowSelectionRequiredError",
     "evaluate",
     "resolve_initial_action",
@@ -88,6 +91,13 @@ __all__ = [
 #: The ``reason`` for the one action not selected by an outcome or decision
 #: rule: a completed Run on a step that declares no outcome rules (SF-22).
 REASON_NO_OUTCOME = "no_outcome"
+
+#: The ``reason`` for a retry after a failed Run (SF-35): the failed
+#: assignment is re-issued as a new Run on the same step or skill. Like
+#: ``REASON_NO_OUTCOME``, a synthetic v0 reason rather than a workflow-table
+#: key, and what ``resolve-task`` stores as the retry Run's
+#: ``trigger_reason`` (SF-A-5 §4.7).
+REASON_RUN_FAILED = "run_failed"
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -143,6 +153,14 @@ class EvaluationInput:
     from :func:`evaluate`. Previous Runs, previous Results, artifacts and
     lifecycle events are deliberately absent -- "the evaluator uses the current
     lifecycle state rather than replaying the entire history" (SF-A-4 §4).
+
+    ``current_skill`` is the skill the current skill-targeted Run executed,
+    recovered by the caller from its ``run.created`` payload (the ``Run`` row
+    carries no skill column). It is consulted only on the failed skill-Run
+    path (SF-35); anywhere else it is ignored, deliberately leniently -- a
+    strict coupling of an optional input to one lifecycle state would force a
+    future rule that consults the skill elsewhere to loosen validation first,
+    and validation must not preclude future rules.
     """
 
     task: Task
@@ -150,6 +168,7 @@ class EvaluationInput:
     current_run: Run
     result: Result
     human_decision: HumanDecision | None = None
+    current_skill: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, Task):
@@ -165,6 +184,12 @@ class EvaluationInput:
         ):
             raise ValueError(
                 "EvaluationInput.human_decision must be a HumanDecision or None"
+            )
+        if self.current_skill is not None:
+            object.__setattr__(
+                self,
+                "current_skill",
+                _require_text(self.current_skill, "EvaluationInput.current_skill"),
             )
 
         if self.current_run.task_id != self.task.id:
@@ -197,9 +222,11 @@ class EvaluationOutput:
     what SF-A-5 §4.7 stores as the next Run's ``trigger_reason`` and is required
     because an action always has a cause. The causes that are not an outcome or
     a decision are ``TRIGGER_REASON_INITIAL``, produced by
-    :func:`resolve_initial_action` -- never by :func:`evaluate` -- and
+    :func:`resolve_initial_action` -- never by :func:`evaluate` --,
     ``REASON_NO_OUTCOME``, produced by :func:`evaluate` for an outcome-less
-    Result on a step that declares no outcome rules (SF-22).
+    Result on a step that declares no outcome rules (SF-22), and
+    ``REASON_RUN_FAILED``, produced by :func:`evaluate` for a failed Result,
+    which retries the same step or skill (SF-35).
 
     ``__post_init__`` repeats ``OutcomeRule``'s target invariant: ``run`` carries
     exactly one of ``step`` / ``skill``; ``human`` / ``complete`` / ``cancel``
@@ -245,8 +272,15 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
 
     The rule order below is the contract: it fixes error precedence.
 
-    1. A non-``completed`` Result has no v0 lifecycle rule -- failure handling is
-       SF-35. ``EvaluationError``.
+    1. A ``failed`` Result retries the same assignment (SF-35) -- the one
+       non-table rule, and it fires first: no outcome/decision table is ever
+       consulted, and any ``human_decision`` or ``outcome`` on the Result is
+       ignored. A step Run retries its step (absent from the Workflow --
+       the definition changed under a live Task -- has no v0 rule.
+       ``EvaluationError``); a skill-targeted Run retries ``current_skill``
+       (absent -- the caller resolves it from the ``run.created`` payload --
+       is a caller error. ``ValueError``). Returns ``run`` with reason
+       ``REASON_RUN_FAILED``.
     2. A skill-targeted Run (SF-A-4 §9) has no step of its own: its outcome
        names the interpreting step -- ``Outcome.type``, persisted from the
        triggering step by ``complete-run`` (SF-32 gap-fill). No outcome, or a
@@ -270,11 +304,34 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
     run = evaluation.current_run
     result = evaluation.result
 
-    if result.status is not ResultStatus.COMPLETED:
-        raise EvaluationError(
-            f"run {run.id!r} produced a {result.status.value!r} Result; v0 "
-            "Lifecycle Evaluation only handles a 'completed' Result "
-            "(failed-Run handling is SF-35)"
+    if result.status is ResultStatus.FAILED:
+        # The failed assignment is re-issued as a new Run; the failed Run
+        # itself is never resumed (SF-A-1 §4). A skill Run retries its
+        # skill -- the triggering step's outcome that launched it still
+        # stands, so re-running the triggering step would answer the wrong
+        # question.
+        if run.step_id is not None:
+            if evaluation.workflow.find_step(run.step_id) is None:
+                raise EvaluationError(
+                    f"run {run.id!r} names step {run.step_id!r}, absent from "
+                    f"workflow {evaluation.workflow.name!r}; the failed Run "
+                    "cannot retry a step the definition no longer declares"
+                )
+            return EvaluationOutput(
+                action=ActionType.RUN,
+                reason=REASON_RUN_FAILED,
+                step=run.step_id,
+            )
+        if evaluation.current_skill is None:
+            raise ValueError(
+                f"run {run.id!r} is skill-targeted and failed, so evaluate() "
+                "needs current_skill (resolved by the caller from the Run's "
+                "'run.created' payload) to retry it"
+            )
+        return EvaluationOutput(
+            action=ActionType.RUN,
+            reason=REASON_RUN_FAILED,
+            skill=evaluation.current_skill,
         )
 
     if run.step_id is None:

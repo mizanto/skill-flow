@@ -17,7 +17,10 @@ the order is the contract, because it fixes error precedence:
 5  load Workflow by id .............. missing/invalid file -> WorkflowLoadError
 6  resolve action (initial or subsequent) ................. -> RunNotCompleted /
                                                            ResultMissing /
+                                                           StepUnresolved /
                                                            EvaluationError
+   (a failed latest Run retries the same step or skill -- SF-35 -- with
+   the skill recovered from its `run.created` payload)
 7  validate the action BEFORE writing -> NoLifecycleAction / WorkflowMismatch
 8  read artifacts: the Task's (a step Run) or the triggering Run's
    (a skill-targeted Run, SF-32)
@@ -46,7 +49,7 @@ only ``sqlite3`` and ``skillflow`` value/layer modules.
 
 import sqlite3
 
-from skillflow.domain import RunStatus, TaskStatus
+from skillflow.domain import LifecycleEventType, RunStatus, TaskStatus
 from skillflow.evaluator import (
     EvaluationInput,
     WorkflowSelectionRequiredError,
@@ -61,6 +64,7 @@ from skillflow.store import (
     list_artifacts_for_run,
     list_artifacts_for_task,
     list_human_decisions_for_task,
+    list_lifecycle_events_for_task,
     list_runs_for_task,
 )
 from skillflow.workflow import ActionType
@@ -78,8 +82,11 @@ class ResolveTaskError(Exception):
     carries SF-A-5 §4.3's identifiers verbatim (``"TaskNotFound"``,
     ``"TaskAlreadyCompleted"``, ``"TaskCancelled"``,
     ``"HumanDecisionRequired"``, ``"ActiveRunExists"``, plus
-    ``"WorkflowMismatch"``, ``"NoLifecycleAction"``, ``"RunNotCompleted"``
-    and ``"ResultMissing"``) so tests and the Skill layer can branch
+    ``"WorkflowMismatch"``, ``"NoLifecycleAction"``, ``"RunNotCompleted"``,
+    ``"ResultMissing"`` and ``"StepUnresolved"`` -- the last for a failed
+    skill-targeted Run whose ``run.created`` payload names no skill to
+    retry, the same code family ``complete-run``/``fail-run`` use for
+    unresolvable skill routing) so tests and the Skill layer can branch
     without parsing prose. Every message ends with the concrete next
     command the user should run (AGENTS.md principle 13).
     """
@@ -196,25 +203,63 @@ def resolve_task(
         triggered_by_run_id = None
     else:
         current = runs[-1]
-        if current.status is not RunStatus.COMPLETED:
+        if current.status not in (RunStatus.COMPLETED, RunStatus.FAILED):
+            # A `running` latest Run is unreachable here -- step 3 rejects an
+            # active Run first -- so this branch names a terminal-but-closed
+            # Run (cancelled) or a parked one: nothing to finish, only
+            # history to investigate.
             raise ResolveTaskError(
                 "RunNotCompleted",
                 f"latest run {current.id!r} of task {task.id!r} is "
-                f"{current.status.value!r}; only a 'completed' Run advances "
-                "the lifecycle -- finish it with `/skillflow:complete-run`, "
+                f"{current.status.value!r}; only a 'completed' or 'failed' "
+                "Run advances the lifecycle -- investigate the Run history, "
                 f"then run `skillflow resolve-task {task.id}`",
             )
         result = get_result_for_run(conn, current.id)
         if result is None:
+            hint = (
+                "record it with `/skillflow:complete-run`"
+                if current.status is RunStatus.COMPLETED
+                else "investigate the Run history (a failed Run cannot complete)"
+            )
             raise ResolveTaskError(
                 "ResultMissing",
-                f"completed run {current.id!r} has no canonical Result; "
-                "record it with `/skillflow:complete-run`, then run "
+                f"{current.status.value} run {current.id!r} has no canonical "
+                f"Result; {hint}, then run "
                 f"`skillflow resolve-task {task.id}`",
             )
+        if current.status is RunStatus.FAILED and current.step_id is None:
+            # A failed skill-targeted Run (SF-35): the retry re-issues the
+            # recorded skill, resolved from the Run's own `run.created`
+            # payload -- the same lookup `fail_run` performs, duplicated
+            # here with it rather than shared (a five-line filter; a shared
+            # helper no other issue asks for is the alternative).
+            skill = next(
+                (
+                    event.payload["skill"]
+                    for event in list_lifecycle_events_for_task(conn, task.id)
+                    if event.run_id == current.id
+                    and event.type is LifecycleEventType.RUN_CREATED
+                    and event.payload is not None
+                    and event.payload.get("skill")
+                ),
+                None,
+            )
+            if skill is None:
+                raise ResolveTaskError(
+                    "StepUnresolved",
+                    f"run {current.id!r} is skill-targeted but its "
+                    "`run.created` event names no skill, so the retry "
+                    "target cannot be resolved -- investigate the Run "
+                    "history, then run "
+                    f"`skillflow resolve-task {task.id}`",
+                )
+        else:
+            skill = None
         # The store orders by (created_at, id): the last decision on this
         # Run wins. This reproduces decide's routing deterministically in a
-        # new session.
+        # new session. (A failed Run never carries one -- `decide` answers a
+        # completed Run only -- so this filter is empty on the retry path.)
         decisions = [
             d
             for d in list_human_decisions_for_task(conn, task.id)
@@ -227,6 +272,7 @@ def resolve_task(
                 current_run=current,
                 result=result,
                 human_decision=decisions[-1] if decisions else None,
+                current_skill=skill,
             )
         )
         triggered_by_run_id = current.id

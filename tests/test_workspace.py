@@ -37,6 +37,7 @@ def test_workspace_convention_constants():
     assert workspace.DB_FILE_NAME == "skillflow.db"
     assert workspace.ARTIFACTS_DIR_NAME == "artifacts"
     assert workspace.RUNS_DIR_NAME == "runs"
+    assert workspace.OUTPUT_LOG_FILE_NAME == "output.log"
 
 
 def test_public_surface():
@@ -45,6 +46,7 @@ def test_public_surface():
         "DB_FILE_NAME",
         "ARTIFACTS_DIR_NAME",
         "RUNS_DIR_NAME",
+        "OUTPUT_LOG_FILE_NAME",
         "WORKFLOWS_DIR_NAME",
         "SCHEMA_VERSION",
         "WorkspaceError",
@@ -173,6 +175,20 @@ def test_workspace_paths_are_built_from_constants(tmp_path):
     assert ws.db_path == tmp_path / ".skillflow" / "skillflow.db"
     assert ws.artifacts_dir == tmp_path / ".skillflow" / "artifacts"
     assert ws.runs_dir == tmp_path / ".skillflow" / "runs"
+
+
+def test_run_dir_derives_the_per_run_diagnostics_directory(tmp_path):
+    ws = init_workspace(_repo(tmp_path))
+    assert ws.run_dir("run-abc") == tmp_path / ".skillflow" / "runs" / "run-abc"
+
+
+@pytest.mark.parametrize(
+    "run_id", ["", "   ", "a/b", "a\\b", "a\x00b", ".", "..", None, 123]
+)
+def test_run_dir_rejects_non_path_components(tmp_path, run_id):
+    ws = init_workspace(_repo(tmp_path))
+    with pytest.raises(ValueError, match="path component"):
+        ws.run_dir(run_id)
 
 
 def test_workspace_resolves_root_so_equal_directories_compare_equal(tmp_path):

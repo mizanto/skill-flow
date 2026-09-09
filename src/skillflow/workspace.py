@@ -36,6 +36,7 @@ __all__ = [
     "DB_FILE_NAME",
     "ARTIFACTS_DIR_NAME",
     "RUNS_DIR_NAME",
+    "OUTPUT_LOG_FILE_NAME",
     "WORKFLOWS_DIR_NAME",
     "SCHEMA_VERSION",
     "WorkspaceError",
@@ -52,6 +53,9 @@ WORKSPACE_DIR_NAME = ".skillflow"
 DB_FILE_NAME = "skillflow.db"
 ARTIFACTS_DIR_NAME = "artifacts"
 RUNS_DIR_NAME = "runs"
+#: The per-Run diagnostics file (SF-A-2 §7), written primarily on failure.
+#: Diagnostic data, not a domain Artifact.
+OUTPUT_LOG_FILE_NAME = "output.log"
 #: Directory (at the repository root) holding committed Workflow Definition
 #: files (``<definition-id>.yaml``). Named here so ``resolve-task`` can map a
 #: Task's ``workflow_definition_id`` to a file; never created by
@@ -155,6 +159,24 @@ class Workspace:
     def runs_dir(self) -> Path:
         """The parent directory for per-Run diagnostics."""
         return self.path / RUNS_DIR_NAME
+
+    def run_dir(self, run_id: str) -> Path:
+        """Return the ``runs/<run-id>/`` diagnostics directory for ``run_id``.
+
+        Pure path derivation, like every other path here. ``run_id`` becomes
+        a path component, so a blank id, a separator, a null byte, or a
+        directory entry (``.`` / ``..``) is rejected before any I/O --
+        the traversal surface of ``artifacts._artifact_name`` minus the
+        drive check, since a database id is not user-supplied display text.
+        """
+        if (
+            not isinstance(run_id, str)
+            or not run_id.strip()
+            or run_id.strip() in {".", ".."}
+            or any(char in run_id for char in ("/", "\\", "\x00"))
+        ):
+            raise ValueError(f"run id must be a plain path component, not {run_id!r}")
+        return self.runs_dir / run_id.strip()
 
     @property
     def workflows_dir(self) -> Path:

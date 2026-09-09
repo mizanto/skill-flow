@@ -56,6 +56,24 @@ creates the next Run.
    the next Run, not even for a `run` action. A `run` result means "Task stays
    `active`; start the next Run later", never "continue working now".
 
+## If the Run failed
+
+When the bounded work cannot be completed at all (blocked, broken
+environment, wrong assignment), do NOT complete the Run as successful: a
+completed Result for failed work is a false observation. Instead report the
+failure to the user -- what failed, and which partial outputs exist as
+ordinary files -- and recommend the operator command that records it:
+
+```text
+skillflow fail-run --task <task-id> --message "<failure summary>" [--artifact NAME:TYPE:PATH ...]
+```
+
+It marks the Run `failed` with a failed Result, stores the summary in
+`runs/<run-id>/output.log`, registers the partial outputs so the retry can
+use them, and leaves the Task `active`. The retry is a new Run via
+`/skillflow:resolve-task <task-id>` in a new Claude Code session; it
+receives a clean same-step assignment, never the diagnostics.
+
 ## Recovery
 
 On any rejection the Run stays `running` with no Result created and no

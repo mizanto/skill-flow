@@ -56,7 +56,7 @@ from uuid import uuid4
 
 from skillflow import store
 from skillflow.domain import Artifact, LifecycleEvent, LifecycleEventType
-from skillflow.workspace import Workspace
+from skillflow.workspace import OUTPUT_LOG_FILE_NAME, Workspace
 
 __all__ = [
     "ArtifactStorageError",
@@ -64,6 +64,7 @@ __all__ = [
     "content_path",
     "read_content",
     "register_artifact",
+    "write_diagnostics",
 ]
 
 
@@ -146,26 +147,28 @@ def content_path(workspace: Workspace, artifact: Artifact) -> Path:
     return path
 
 
-def _write_new_file(path: Path, content: str) -> None:
+def _write_new_file(
+    path: Path, content: str, *, kind: str = "artifact content file"
+) -> None:
     """Create ``path`` and write ``content``. Never overwrites.
 
     ``"x"`` is exclusive creation: an existing file means the metadata row and
     the content file have drifted apart, which is reported rather than papered
     over. ``newline="\\n"`` keeps stored content byte-identical across platforms.
+    ``kind`` names what is written in the error messages (``"diagnostics file"``
+    for ``output.log``) so a diagnostics failure never reports an artifact path.
     """
     try:
         with open(path, "x", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
     except FileExistsError as exc:
         raise ArtifactStorageError(
-            f"artifact content file already exists: {path}. An existing file at a "
+            f"{kind} already exists: {path}. An existing file at a "
             "new version's path means the metadata and the content store have "
             "drifted; investigate or delete it rather than overwriting."
         ) from exc
     except OSError as exc:
-        raise ArtifactStorageError(
-            f"could not write artifact content file {path}: {exc}"
-        ) from exc
+        raise ArtifactStorageError(f"could not write {kind} {path}: {exc}") from exc
 
 
 def register_artifact(
@@ -303,6 +306,35 @@ def create_artifact(
             written.unlink(missing_ok=True)
         raise
     return artifact
+
+
+def write_diagnostics(workspace: Workspace, *, run_id: str, content: str) -> Path:
+    """Write ``content`` to ``runs/<run-id>/output.log`` (SF-A-2 §7).
+
+    Diagnostic data, not a domain Artifact: no metadata row, no event, no
+    version chain. A Run fails once, so the file is created exclusively --
+    an existing ``output.log`` reports drift rather than overwriting.
+
+    The caller owns the transaction and the orphan-file cleanup: if the
+    caller's commit fails after this returns, it must unlink the returned
+    path (the same contract as :func:`register_artifact`).
+
+    Raises ``ValueError`` for a ``run_id`` that is not a plain path component
+    or a non-string ``content``, and :class:`ArtifactStorageError` if the
+    directory or file cannot be written.
+    """
+    if not isinstance(content, str):
+        raise ValueError("diagnostics content must be a string")
+    run_dir = workspace.run_dir(run_id)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ArtifactStorageError(
+            f"could not create diagnostics directory {run_dir}: {exc}"
+        ) from exc
+    path = run_dir / OUTPUT_LOG_FILE_NAME
+    _write_new_file(path, content, kind="diagnostics file")
+    return path
 
 
 def read_content(workspace: Workspace, artifact: Artifact) -> str:

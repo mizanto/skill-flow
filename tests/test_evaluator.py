@@ -140,6 +140,7 @@ def test_all_matches_the_public_surface():
     assert set(evaluator.__all__) == V0_DATACLASSES | {
         "EvaluationError",
         "REASON_NO_OUTCOME",
+        "REASON_RUN_FAILED",
         "WorkflowSelectionRequiredError",
         "evaluate",
         "resolve_initial_action",
@@ -147,7 +148,14 @@ def test_all_matches_the_public_surface():
 
 
 V0_FIELDS = {
-    EvaluationInput: {"task", "workflow", "current_run", "result", "human_decision"},
+    EvaluationInput: {
+        "task",
+        "workflow",
+        "current_run",
+        "result",
+        "human_decision",
+        "current_skill",
+    },
     EvaluationOutput: {"action", "reason", "step", "skill"},
 }
 
@@ -399,13 +407,119 @@ def test_human_decision_still_routes_on_a_step_with_no_outcomes():
     assert out.reason == "go"
 
 
-def test_failed_result_rejected_naming_sf35(workflow):
-    with pytest.raises(EvaluationError, match="SF-35"):
+def test_failed_result_retries_the_same_step(workflow):
+    # SF-35: a failed Result is the one non-table rule -- the failed
+    # assignment is re-issued as a new Run on the same step.
+    out = evaluate(
+        _input(
+            workflow,
+            result=_result(status=ResultStatus.FAILED),
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("review", None)
+    assert out.reason == evaluator.REASON_RUN_FAILED == "run_failed"
+
+
+def test_failed_result_ignores_a_present_outcome(workflow):
+    # Rule 1 fires before any table lookup: an outcome on a failed Result
+    # (raw-SQL-only -- fail-run never writes one) is never consulted.
+    out = evaluate(
+        _input(
+            workflow,
+            result=_result(
+                status=ResultStatus.FAILED,
+                outcome=Outcome(type="review", decision="approved"),
+            ),
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("review", None)
+    assert out.reason == "run_failed"
+
+
+def test_failed_result_ignores_a_human_decision(workflow):
+    # Unreachable via commands (decide answers a completed Run only), but
+    # deterministic anyway: the retry does not branch on the decision.
+    out = evaluate(
+        _input(
+            workflow,
+            result=_result(status=ResultStatus.FAILED),
+            decision="approve",
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("review", None)
+    assert out.reason == "run_failed"
+
+
+def test_failed_result_on_an_absent_step_rejected(workflow):
+    # The definition changed under a live Task: reject rather than invent a
+    # retry target.
+    with pytest.raises(EvaluationError, match="absent from workflow"):
         evaluate(
             _input(
                 workflow,
+                step_id="architecture",
                 result=_result(status=ResultStatus.FAILED),
             )
+        )
+
+
+def test_failed_skill_run_retries_the_recorded_skill(workflow):
+    out = evaluate(
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id=None),
+            result=_result(status=ResultStatus.FAILED),
+            current_skill="research",
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == (None, "research")
+    assert out.reason == "run_failed"
+
+
+def test_failed_skill_run_without_a_skill_rejected(workflow):
+    # Caller error: the commands resolve the skill from the run.created
+    # payload first and raise a coded rejection when it is missing.
+    with pytest.raises(ValueError, match="current_skill"):
+        evaluate(
+            EvaluationInput(
+                task=_task(),
+                workflow=workflow,
+                current_run=_run(step_id=None),
+                result=_result(status=ResultStatus.FAILED),
+            )
+        )
+
+
+def test_current_skill_ignored_on_the_completed_path(workflow):
+    # Lenient by design: set-but-unused input must not break the table rules
+    # or preclude future rules from consulting the skill elsewhere.
+    out = evaluate(
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id="review"),
+            result=_result(outcome=Outcome(type="review", decision="approved")),
+            current_skill="research",
+        )
+    )
+    assert out.action is ActionType.COMPLETE
+    assert out.reason == "approved"
+
+
+@pytest.mark.parametrize("skill", ["", "   ", 123, ["research"]])
+def test_current_skill_rejects_blank_or_non_string(workflow, skill):
+    with pytest.raises(ValueError, match="current_skill"):
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id=None),
+            result=_result(status=ResultStatus.FAILED),
+            current_skill=skill,
         )
 
 
@@ -551,18 +665,23 @@ def test_skill_targeted_run_with_skill_targeting_decision_rejected():
 
 
 def test_failed_result_precedence_over_skill_routing(workflow):
-    # Rule 1 still fires first for a skill Run.
-    with pytest.raises(EvaluationError, match="SF-35"):
-        evaluate(
-            _input(
-                workflow,
-                step_id=None,
-                result=_result(
-                    outcome=Outcome(type="review", decision="replan"),
-                    status=ResultStatus.FAILED,
-                ),
-            )
+    # Rule 1 still fires first for a skill Run: the outcome that would route
+    # is ignored and the recorded skill retried instead.
+    out = evaluate(
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id=None),
+            result=_result(
+                outcome=Outcome(type="review", decision="replan"),
+                status=ResultStatus.FAILED,
+            ),
+            current_skill="research",
         )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == (None, "research")
+    assert out.reason == "run_failed"
 
 
 def test_step_absent_from_workflow_rejected(workflow):
@@ -577,17 +696,20 @@ def test_step_absent_from_workflow_rejected(workflow):
 
 
 def test_failed_result_precedence_over_unknown_outcome(workflow):
-    # Rule 1 (failed Result) fires before rule 5 (unknown outcome).
-    with pytest.raises(EvaluationError, match="failed|SF-35"):
-        evaluate(
-            _input(
-                workflow,
-                result=_result(
-                    status=ResultStatus.FAILED,
-                    outcome=Outcome(type="review", decision="nonsense"),
-                ),
-            )
+    # Rule 1 (failed Result) fires before rule 5 (unknown outcome): even a
+    # nonsense decision never reaches the table lookup.
+    out = evaluate(
+        _input(
+            workflow,
+            result=_result(
+                status=ResultStatus.FAILED,
+                outcome=Outcome(type="review", decision="nonsense"),
+            ),
         )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("review", None)
+    assert out.reason == "run_failed"
 
 
 def test_step_with_no_outcomes_rejects_any_decision():

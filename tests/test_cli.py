@@ -10,6 +10,7 @@ from skillflow.cli import (
     format_artifact_report,
     format_completion,
     format_decision,
+    format_failure,
     format_run_input,
     main,
 )
@@ -27,6 +28,7 @@ from skillflow.domain import (
     TaskStatus,
 )
 from skillflow.evaluator import EvaluationOutput
+from skillflow.fail_run import RunFailure
 from skillflow.outputs import OutputCheck, OutputValidation
 from skillflow.prepare_artifacts import ArtifactReport
 from skillflow.run_input import (
@@ -1611,3 +1613,266 @@ def test_format_decision_human_action_raises():
 
     with pytest.raises(ValueError, match="must not itself produce"):
         format_decision(record)
+
+
+# --- fail-run ---------------------------------------------------------------
+
+
+def _fail_cli(cli_conn, cli_ws, *, message=None, diagnostics_file=None, artifacts=()):
+    """Fail the current Run through ``main``; return the exit code."""
+    args = ["fail-run"]
+    if message is not None:
+        args += ["--message", message]
+    if diagnostics_file is not None:
+        args += ["--diagnostics-file", diagnostics_file]
+    for name, type_ in artifacts:
+        _write_artifact_file(cli_ws, name)
+        args += ["--artifact", f"{name}:{type_}:{name}"]
+    return main(args)
+
+
+def test_fail_run_vertical_slice(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert _fail_cli(cli_conn, cli_ws, message="boom: OOM") == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = captured.out
+    assert f"Run {run.id} failed." in out
+    assert "Task status:\nactive" in out
+    assert f"Diagnostics: runs/{run.id}/output.log" in out
+    assert "Next action:" in out
+    assert "Run requirements." in out
+    assert f"/skillflow:resolve-task {task.id}" in out
+    done = store.get_run(cli_conn, run.id)
+    assert done.status is RunStatus.FAILED
+    assert done.completed_at is not None
+    result = store.get_result_for_run(cli_conn, run.id)
+    assert result is not None
+    assert result.status is ResultStatus.FAILED
+    assert result.outcome is None
+    log = cli_ws.run_dir(run.id) / "output.log"
+    assert log.read_text(encoding="utf-8") == "boom: OOM"
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == 1
+
+
+def test_fail_run_with_diagnostics_file(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    cli_ws.root.joinpath("crash.txt").write_text("raw\noutput\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert _fail_cli(cli_conn, cli_ws, diagnostics_file="crash.txt") == 0
+
+    assert f"Diagnostics: runs/{run.id}/output.log" in capsys.readouterr().out
+    log = cli_ws.run_dir(run.id) / "output.log"
+    assert log.read_text(encoding="utf-8") == "raw\noutput\n"
+    assert store.get_run(cli_conn, run.id).status is RunStatus.FAILED
+
+
+def test_fail_run_without_diagnostics_writes_no_file(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert _fail_cli(cli_conn, cli_ws) == 0
+
+    out = capsys.readouterr().out
+    assert f"Run {run.id} failed." in out
+    assert "Diagnostics:" not in out
+    assert not (cli_ws.runs_dir / run.id).exists()
+
+
+def test_fail_run_with_artifact_registers_partial(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+
+    assert (
+        _fail_cli(
+            cli_conn,
+            cli_ws,
+            message="boom",
+            artifacts=(("notes.md", "notes"),),
+        )
+        == 0
+    )
+
+    registered = store.list_artifacts_for_run(cli_conn, run.id)
+    assert [(a.name, a.type, a.version) for a in registered] == [
+        ("notes.md", "notes", 1)
+    ]
+
+
+def test_fail_run_message_and_file_rejected(cli_conn, cli_ws):
+    _resolve_cli_task(cli_conn)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["fail-run", "--message", "x", "--diagnostics-file", "y"])
+    assert exc_info.value.code == 2
+
+
+def test_fail_run_blank_message_exits_one(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert _fail_cli(cli_conn, cli_ws, message="   ") == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty --message" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_fail_run_missing_diagnostics_file_exits_one(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert _fail_cli(cli_conn, cli_ws, diagnostics_file="nope.txt") == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "cannot read --diagnostics-file" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+
+
+def test_fail_run_non_utf8_diagnostics_file_exits_one(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+    cli_ws.root.joinpath("binary.txt").write_bytes(b"\xff\xfe\x00invalid")
+
+    assert _fail_cli(cli_conn, cli_ws, diagnostics_file="binary.txt") == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not valid UTF-8" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+
+
+def test_fail_run_bad_artifact_mentions_fail_run_rerun(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["fail-run", "--artifact", "malformed"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "malformed --artifact" in captured.err
+    assert "skillflow fail-run" in captured.err
+    assert "complete-run" not in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+
+
+def test_fail_run_without_running_run_exits_one(cli_conn, capsys):
+    _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["fail-run", "--message", "boom"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "resolve-task" in captured.err
+
+
+def test_fail_run_task_selects_the_named_task(cli_conn, cli_ws, capsys):
+    task_a, run_a = _resolve_cli_task(cli_conn, title="First")
+    task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
+
+    assert main(["fail-run", "--task", task_a.id, "--message", "boom"]) == 0
+
+    assert store.get_run(cli_conn, run_a.id).status is RunStatus.FAILED
+    assert store.get_run(cli_conn, run_b.id).status is RunStatus.RUNNING
+
+
+def _failure(
+    *, step="requirements", skill=None, diagnostics_path="runs/run-1/output.log"
+):
+    now = datetime.now(UTC)
+    return RunFailure(
+        run=Run(
+            id="run-1",
+            task_id="task-1",
+            status=RunStatus.FAILED,
+            created_at=now,
+            completed_at=now,
+        ),
+        result=Result(
+            id="result-1",
+            run_id="run-1",
+            status=ResultStatus.FAILED,
+            created_at=now,
+        ),
+        task=Task(
+            id="task-1",
+            title="Ship it",
+            description="",
+            status=TaskStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        ),
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="run_failed", step=step, skill=skill
+        ),
+        diagnostics_path=diagnostics_path,
+    )
+
+
+def test_format_failure_step_run():
+    assert format_failure(_failure()) == (
+        "Run run-1 failed.\n"
+        "\n"
+        "Task status:\n"
+        "active\n"
+        "\n"
+        "Diagnostics: runs/run-1/output.log\n"
+        "\n"
+        "Next action:\n"
+        "Run requirements.\n"
+        "\n"
+        "Start the next Run in a new Claude Code session:\n"
+        "\n"
+        "/skillflow:resolve-task task-1"
+    )
+
+
+def test_format_failure_without_diagnostics():
+    rendered = format_failure(_failure(diagnostics_path=None))
+
+    assert "Diagnostics:" not in rendered
+    assert "Run run-1 failed." in rendered
+    assert "Run requirements." in rendered
+
+
+def test_format_failure_skill_run():
+    rendered = format_failure(_failure(step=None, skill="research"))
+
+    assert "Run skill 'research' (reason: run_failed)." in rendered
+    assert "/skillflow:resolve-task task-1" in rendered
+
+
+def test_format_failure_non_run_action_raises():
+    now = datetime.now(UTC)
+    failure = RunFailure(
+        run=Run(
+            id="run-1",
+            task_id="task-1",
+            status=RunStatus.FAILED,
+            created_at=now,
+        ),
+        result=Result(
+            id="result-1",
+            run_id="run-1",
+            status=ResultStatus.FAILED,
+            created_at=now,
+        ),
+        task=Task(
+            id="task-1",
+            title="Ship it",
+            description="",
+            status=TaskStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        ),
+        action=EvaluationOutput(action=ActionType.COMPLETE, reason="approved"),
+    )
+
+    with pytest.raises(ValueError, match="always retries as 'run'"):
+        format_failure(failure)

@@ -27,6 +27,7 @@ from skillflow.artifacts import (
     create_artifact,
     read_content,
     register_artifact,
+    write_diagnostics,
 )
 from skillflow.domain import LifecycleEventType
 from skillflow.service import create_task
@@ -108,6 +109,7 @@ def test_public_surface():
         "content_path",
         "read_content",
         "register_artifact",
+        "write_diagnostics",
     }
 
 
@@ -628,3 +630,41 @@ def test_read_content_reports_undecodable_content(ws, conn):
 
     with pytest.raises(ArtifactStorageError):
         read_content(ws, artifact)
+
+
+def test_write_diagnostics_creates_output_log(ws, conn):
+    path = write_diagnostics(ws, run_id="run-1", content="boom\n")
+
+    assert path == ws.run_dir("run-1") / "output.log"
+    assert path.read_text(encoding="utf-8") == "boom\n"
+    # Diagnostic data, not an Artifact: no metadata row, no event.
+    assert _artifact_rows(conn) == []
+    assert _rows(conn, "lifecycle_events") == []
+
+
+def test_write_diagnostics_never_overwrites(ws):
+    write_diagnostics(ws, run_id="run-1", content="first")
+
+    with pytest.raises(ArtifactStorageError) as exc_info:
+        write_diagnostics(ws, run_id="run-1", content="second")
+
+    assert "diagnostics file" in str(exc_info.value)
+    assert "artifact" not in str(exc_info.value)
+    assert (ws.run_dir("run-1") / "output.log").read_text(encoding="utf-8") == ("first")
+
+
+def test_write_diagnostics_rejects_non_string_content(ws):
+    with pytest.raises(ValueError, match="must be a string"):
+        write_diagnostics(ws, run_id="run-1", content=123)
+
+
+def test_write_diagnostics_rejects_a_non_path_run_id(ws):
+    with pytest.raises(ValueError, match="path component"):
+        write_diagnostics(ws, run_id="../escape", content="x")
+
+
+def test_write_diagnostics_reports_an_unwritable_directory(ws):
+    (ws.runs_dir / "run-1").write_text("blocking file", encoding="utf-8")
+
+    with pytest.raises(ArtifactStorageError, match="diagnostics directory"):
+        write_diagnostics(ws, run_id="run-1", content="x")

@@ -39,8 +39,8 @@ precedence (the convention every sibling module already documents):
 7  LIFECYCLE EVALUATION (SF-A-5 §7.7, pure, reads only)
      evaluate(EvaluationInput(task, definition, current, result,
                               human_decision=snapshot))
-     exactly once -> EvaluationError propagates (a non-completed stored
-     Result, unreachable except via raw SQL)
+     exactly once -> EvaluationError propagates (a stored Result whose
+     step vanished from the definition, unreachable except via raw SQL)
 8  ONE TRANSACTION (`with conn:`)
      store.insert_human_decision(decision)
      store.insert_lifecycle_event(human.decision_made)
