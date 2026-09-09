@@ -79,10 +79,15 @@ __all__ = [
     "EvaluationError",
     "EvaluationInput",
     "EvaluationOutput",
+    "REASON_NO_OUTCOME",
     "WorkflowSelectionRequiredError",
     "evaluate",
     "resolve_initial_action",
 ]
+
+#: The ``reason`` for the one action not selected by an outcome or decision
+#: rule: a completed Run on a step that declares no outcome rules (SF-22).
+REASON_NO_OUTCOME = "no_outcome"
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -190,9 +195,11 @@ class EvaluationOutput:
     ``reason`` is the outcome-decision or Human-Decision string that selected the
     rule (``"approved"``, ``"changes_requested"``, ``"request_changes"``); it is
     what SF-A-5 §4.7 stores as the next Run's ``trigger_reason`` and is required
-    because an action always has a cause. The one cause that is not an outcome
-    or a decision is ``TRIGGER_REASON_INITIAL``, produced by
-    :func:`resolve_initial_action` -- never by :func:`evaluate`.
+    because an action always has a cause. The causes that are not an outcome or
+    a decision are ``TRIGGER_REASON_INITIAL``, produced by
+    :func:`resolve_initial_action` -- never by :func:`evaluate` -- and
+    ``REASON_NO_OUTCOME``, produced by :func:`evaluate` for an outcome-less
+    Result on a step that declares no outcome rules (SF-22).
 
     ``__post_init__`` repeats ``OutcomeRule``'s target invariant: ``run`` carries
     exactly one of ``step`` / ``skill``; ``human`` / ``complete`` / ``cancel``
@@ -245,8 +252,11 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
     3. The step named by the Run is absent from the Workflow (the definition file
        changed under a live Task). ``EvaluationError``.
     4. Pick the rule table: ``human_decision`` -> ``step.decisions`` keyed by the
-       decision; otherwise ``step.outcomes`` keyed by ``result.outcome.decision``
-       (a ``None`` outcome has no lifecycle meaning -- ``EvaluationError``).
+       decision; otherwise ``step.outcomes`` keyed by ``result.outcome.decision``.
+       A ``None`` outcome on a step that declares no outcome rules is terminal
+       -- ``complete`` with reason ``REASON_NO_OUTCOME`` (SF-22); a ``None``
+       outcome on a step that declares outcome rules has no v0 rule --
+       ``EvaluationError``.
     5. No rule for that key -- reject rather than invent a transition (SF-A-4
        §11). ``EvaluationError`` listing the accepted keys.
     6. Return the rule's action verbatim.
@@ -281,14 +291,21 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
         kind = "human decision"
     else:
         if result.outcome is None:
-            if step.outcomes:
-                detail = f"step {step.id!r} declares outcome rules"
-            else:
-                detail = f"step {step.id!r} declares no outcome rules"
+            if not step.outcomes:
+                # A step that declares no outcome rules declares no
+                # continuation: the workflow says nothing follows it, so the
+                # Task's lifecycle ends (SF-A-5 §6.5 permits the outcome-less
+                # Result; SF-22 gives it this meaning). Inferring "the next
+                # step in the list" would put sequencing logic in the
+                # evaluator, which SF-11 rejected.
+                return EvaluationOutput(
+                    action=ActionType.COMPLETE, reason=REASON_NO_OUTCOME
+                )
+            accepted = ", ".join(repr(k) for k in sorted(step.outcomes))
             raise EvaluationError(
-                f"run {run.id!r} produced a Result with no outcome; {detail} "
-                "and no v0 rule gives an outcome-less Result a lifecycle meaning "
-                "(the outcome-less-Result policy is SF-22)"
+                f"run {run.id!r} produced a Result with no outcome, but step "
+                f"{step.id!r} declares outcome rules; complete the Run with one "
+                f"of: [{accepted}]"
             )
         key = result.outcome.decision
         table = step.outcomes

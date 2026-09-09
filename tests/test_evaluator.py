@@ -32,6 +32,7 @@ from skillflow.domain import (
     TaskStatus,
 )
 from skillflow.evaluator import (
+    REASON_NO_OUTCOME,
     EvaluationError,
     EvaluationInput,
     EvaluationOutput,
@@ -138,6 +139,7 @@ def test_module_defines_exactly_the_v0_dataclasses():
 def test_all_matches_the_public_surface():
     assert set(evaluator.__all__) == V0_DATACLASSES | {
         "EvaluationError",
+        "REASON_NO_OUTCOME",
         "WorkflowSelectionRequiredError",
         "evaluate",
         "resolve_initial_action",
@@ -334,14 +336,28 @@ def test_outcome_less_result_on_a_step_with_outcomes_rejected(workflow):
     msg = str(exc.value)
     assert "no outcome" in msg
     assert "declares outcome rules" in msg
-    assert "SF-22" in msg
+    assert "'approved'" in msg and "'changes_requested'" in msg
 
 
-def test_outcome_less_result_on_a_step_with_no_outcomes_rejected():
-    # The one combination both plan §13.2 and the implementation report name as
-    # the open policy question: empty `outcomes` AND `Result.outcome is None`.
-    # Schema-valid (WorkflowStep permits an empty `outcomes`), yet unevaluable
-    # in v0. Pinned so SF-22 sees a failing test when it changes the policy.
+def test_outcome_less_result_on_a_step_with_no_outcomes_completes():
+    # This test replaces SF-11's pinned rejection: SF-22 settles the
+    # outcome-less-Result policy (plan §6.2) -- a step that declares no
+    # outcome rules declares no continuation, so the Task's lifecycle ends.
+    workflow = Workflow(name="w", steps=(WorkflowStep(id="only", skill="sk"),))
+    out = evaluate(
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id="only"),
+            result=_result(outcome=None),
+        )
+    )
+    assert out.action is ActionType.COMPLETE
+    assert out.reason == REASON_NO_OUTCOME == "no_outcome"
+    assert out.step is None and out.skill is None
+
+
+def test_outcome_on_a_step_with_no_outcomes_rejected():
     workflow = Workflow(name="w", steps=(WorkflowStep(id="only", skill="sk"),))
     with pytest.raises(EvaluationError) as exc:
         evaluate(
@@ -349,13 +365,38 @@ def test_outcome_less_result_on_a_step_with_no_outcomes_rejected():
                 task=_task(),
                 workflow=workflow,
                 current_run=_run(step_id="only"),
-                result=_result(outcome=None),
+                result=_result(outcome=Outcome(type="only", decision="ready")),
             )
         )
     msg = str(exc.value)
-    assert "no outcome" in msg
-    assert "declares no outcome rules" in msg
-    assert "SF-22" in msg
+    assert "'ready'" in msg
+    assert "accepted: []" in msg
+
+
+def test_human_decision_still_routes_on_a_step_with_no_outcomes():
+    # The new outcome-less rule must not shadow the decision branch: a Human
+    # Decision is keyed against `step.decisions` first.
+    workflow = Workflow(
+        name="w",
+        steps=(
+            WorkflowStep(
+                id="only",
+                skill="sk",
+                decisions={"go": OutcomeRule(action=ActionType.COMPLETE)},
+            ),
+        ),
+    )
+    out = evaluate(
+        EvaluationInput(
+            task=_task(),
+            workflow=workflow,
+            current_run=_run(step_id="only"),
+            result=_result(outcome=None),
+            human_decision=_decision("go"),
+        )
+    )
+    assert out.action is ActionType.COMPLETE
+    assert out.reason == "go"
 
 
 def test_failed_result_rejected_naming_sf35(workflow):

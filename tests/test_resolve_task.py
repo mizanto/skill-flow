@@ -515,6 +515,32 @@ def test_terminal_action_is_rejected_without_a_write(conn, ws, workflows):
     assert len(store.list_runs_for_task(conn, task.id)) == 4
 
 
+def test_outcome_less_step_completion_is_rejected_without_a_write(
+    conn, ws, workflows
+):
+    # SF-22: a step declaring no outcome rules is terminal -- completing its
+    # Run without an outcome resolves to `complete`, so resolve-task raises
+    # NoLifecycleAction (previously EvaluationError propagated).
+    (workflows / "single.yaml").write_text(
+        "name: single\nsteps:\n  - id: only\n    skill: do-it\n",
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflows / "single.yaml")
+    register_workflow(conn, workflow)
+    task = create_task(conn, title="One step", workflow_definition_id="single")
+
+    run_input = resolve(conn, ws, task_id=task.id)
+    assert run_input.step_id == "only"
+    run = store.get_run(conn, run_input.run_id)
+    _result(conn, _complete(conn, run), decision=None)
+
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "NoLifecycleAction"
+    assert "'complete'" in str(exc_info.value)
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
 def test_human_action_points_at_decide(conn, ws, workflows):
     _, task = _assigned(conn)
     review = _drive_to_review(conn, ws, task)

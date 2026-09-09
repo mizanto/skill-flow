@@ -63,8 +63,15 @@ Identify steps by `id`, not by `hash()`.
 | `outcomes`  | `Mapping[str, OutcomeRule]`   | Default empty. Keys are Result-outcome decision strings (stripped, non-blank, no duplicates after stripping). |
 | `decisions` | `Mapping[str, OutcomeRule]`   | Default empty. Keys are Human-Decision strings. A rule mapping to `action: human` is rejected (SF-A-5 §7.7). |
 
-A step with no `outcomes` is allowed (SF-A-5 §6.5). A step with no `outputs` is
-allowed (the reference `implementation` step declares none).
+A step with no `outcomes` is allowed (SF-A-5 §6.5), and it is terminal: its Run
+completes without an outcome (`skillflow.completion.validate_outcome` returns
+`None` and rejects any supplied outcome as `OutcomeNotExpected`), and Lifecycle
+Evaluation resolves it to `{action: complete}` with reason `no_outcome`. Any
+`decisions` such a step declares are unreachable, because only an `outcomes`
+rule can produce the `human` action that reaches them. A step that should be
+followed by another step must declare the rule that says so — the evaluator
+never infers "the next step in the list". A step with no `outputs` is allowed
+(the reference `implementation` step declares none).
 
 ### `ExpectedOutput`
 
