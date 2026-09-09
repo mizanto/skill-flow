@@ -76,6 +76,7 @@ from skillflow.domain import (
     Run,
     RunStatus,
     Task,
+    TaskStatus,
     WorkflowDefinition,
 )
 from skillflow.workspace import Workspace, connect
@@ -101,6 +102,7 @@ __all__ = [
     "latest_artifact",
     "list_runs_for_task",
     "list_running_runs",
+    "list_tasks_by_status",
     "list_artifacts_for_task",
     "list_artifacts_for_run",
     "list_human_decisions_for_task",
@@ -811,6 +813,21 @@ def list_running_runs(conn: sqlite3.Connection) -> list[Run]:
         (RunStatus.RUNNING.value,),
     ).fetchall()
     return [_to_run(row) for row in rows]
+
+
+def list_tasks_by_status(conn: sqlite3.Connection, status: TaskStatus) -> list[Task]:
+    """Return every Task with ``status``, ordered by ``created_at, id``.
+
+    The workspace-wide Task query: ``decide`` is invoked with no Task id
+    (SF-A-5 §7.1), so the waiting Task is found by status. A workspace with
+    two waiting Tasks legitimately returns two, and disambiguating is the
+    caller's job -- the same split :func:`list_running_runs` uses for Runs.
+    """
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE status = ? ORDER BY created_at, id",
+        (status.value,),
+    ).fetchall()
+    return [_to_task(row) for row in rows]
 
 
 def list_artifacts_for_task(conn: sqlite3.Connection, task_id: str) -> list[Artifact]:

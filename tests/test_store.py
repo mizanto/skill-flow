@@ -57,6 +57,7 @@ from skillflow.store import (
     list_lifecycle_events_for_task,
     list_running_runs,
     list_runs_for_task,
+    list_tasks_by_status,
     open_store,
     update_run,
     update_task,
@@ -206,6 +207,7 @@ def test_public_surface():
         "latest_artifact",
         "list_runs_for_task",
         "list_running_runs",
+        "list_tasks_by_status",
         "list_artifacts_for_task",
         "list_artifacts_for_run",
         "list_human_decisions_for_task",
@@ -1590,3 +1592,62 @@ def test_completed_run_disappears_from_list_running_runs(conn):
     with conn:
         update_run(conn, dataclasses.replace(run, status=RunStatus.COMPLETED))
     assert list_running_runs(conn) == []
+
+
+# --- list_tasks_by_status --------------------------------------------------
+
+
+def test_list_tasks_by_status_on_empty_database_returns_empty(conn):
+    assert list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN) == []
+
+
+def test_list_tasks_by_status_returns_matching_tasks_in_order(conn):
+    _stored_task(conn, id="task-active", status=TaskStatus.ACTIVE)
+    # Three rows where insertion order, id order, and (created_at, id) order
+    # all differ: only the documented ordering passes.
+    _stored_task(
+        conn,
+        id="task-b",
+        status=TaskStatus.WAITING_FOR_HUMAN,
+        created_at=LATER,
+        updated_at=LATER,
+    )
+    _stored_task(
+        conn,
+        id="task-c",
+        status=TaskStatus.WAITING_FOR_HUMAN,
+        created_at=EARLIER,
+        updated_at=EARLIER,
+    )
+    _stored_task(
+        conn,
+        id="task-a",
+        status=TaskStatus.WAITING_FOR_HUMAN,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    assert [t.id for t in list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN)] == [
+        "task-c",
+        "task-a",
+        "task-b",
+    ]
+
+
+def test_list_tasks_by_status_excludes_other_statuses(conn):
+    _stored_task(conn, id="task-active", status=TaskStatus.ACTIVE)
+    _stored_task(conn, id="task-done", status=TaskStatus.COMPLETED)
+    assert list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN) == []
+    assert list_tasks_by_status(conn, TaskStatus.ACTIVE) == [
+        get_task(conn, "task-active")
+    ]
+
+
+def test_retargeted_task_moves_between_status_lists(conn):
+    task = _stored_task(conn, status=TaskStatus.WAITING_FOR_HUMAN)
+    assert list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN) == [task]
+    with conn:
+        update_task(
+            conn, dataclasses.replace(task, status=TaskStatus.ACTIVE, updated_at=LATER)
+        )
+    assert list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN) == []
+    assert list_tasks_by_status(conn, TaskStatus.ACTIVE) == [get_task(conn, task.id)]

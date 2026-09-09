@@ -9,13 +9,16 @@ from skillflow.artifacts import create_artifact
 from skillflow.cli import (
     format_artifact_report,
     format_completion,
+    format_decision,
     format_run_input,
     main,
 )
 from skillflow.complete_run import RunCompletion
 from skillflow.context import ContextSelection
+from skillflow.decide import DecisionRecord
 from skillflow.domain import (
     Artifact,
+    HumanDecision,
     Result,
     ResultStatus,
     Run,
@@ -1273,3 +1276,278 @@ def test_format_completion_without_action():
         "Task status:\n"
         "active"
     )
+
+
+# --- decide -----------------------------------------------------------------
+
+
+def _park_cli_task(cli_conn, cli_ws):
+    """Seed a Task and park it via the real CLI flow; return the Task."""
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="human_required",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    return task
+
+
+def test_decide_without_decision_exits_two():
+    with pytest.raises(SystemExit) as exc_info:
+        main(["decide"])
+    assert exc_info.value.code == 2
+
+
+def test_decide_request_changes_points_at_implementation(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "request_changes"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = captured.out
+    assert "Human decision recorded: request_changes." in out
+    assert "Next action:" in out
+    assert "Run implementation." in out
+    assert f"/skillflow:resolve-task {task.id}" in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    (decision,) = store.list_human_decisions_for_task(cli_conn, task.id)
+    assert decision.decision == "request_changes"
+    assert decision.comment is None
+    # The reported pointer works: the next Run starts in a new resolution.
+    assert main(["resolve-task", task.id]) == 0
+
+
+def test_decide_approve_completes_task(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "approve"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Human decision recorded: approve." in out
+    assert "Task completed." in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.COMPLETED
+
+
+def test_decide_cancel_cancels_task(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "cancel"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Human decision recorded: cancel." in out
+    assert "Task cancelled." in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.CANCELLED
+
+
+def test_decide_comment_is_stored(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "request_changes", "--comment", "Need more tests"]) == 0
+
+    assert "Human decision recorded: request_changes." in capsys.readouterr().out
+    (decision,) = store.list_human_decisions_for_task(cli_conn, task.id)
+    assert decision.comment == "Need more tests"
+
+
+def test_decide_task_selects_the_named_task(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    other = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "approve", "--task", task.id]) == 0
+
+    assert "Human decision recorded: approve." in capsys.readouterr().out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.COMPLETED
+    assert store.get_task(cli_conn, other.id).status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.list_human_decisions_for_task(cli_conn, other.id) == []
+
+
+def test_decide_two_waiting_without_task_exits_one(cli_conn, cli_ws, capsys):
+    first = _park_cli_task(cli_conn, cli_ws)
+    second = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "approve"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert first.id in captured.err
+    assert second.id in captured.err
+    assert store.get_task(cli_conn, first.id).status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.get_task(cli_conn, second.id).status is TaskStatus.WAITING_FOR_HUMAN
+
+
+def test_decide_no_waiting_task_exits_one(cli_conn, capsys):
+    _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["decide", "approve"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "waiting_for_human" in captured.err
+
+
+def test_decide_unknown_task_exits_one(cli_conn, capsys):
+    assert main(["decide", "approve", "--task", "task-nope"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "task-nope" in captured.err
+
+
+def test_decide_active_task_exits_one(cli_conn, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["decide", "approve", "--task", task.id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "active" in captured.err
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    assert store.list_human_decisions_for_task(cli_conn, task.id) == []
+
+
+def test_decide_invalid_decision_exits_one(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "maybe"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "maybe" in captured.err
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.list_human_decisions_for_task(cli_conn, task.id) == []
+
+
+def test_decide_blank_decision_exits_one(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["decide", "  "]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty decision" in captured.err
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.list_human_decisions_for_task(cli_conn, task.id) == []
+
+
+def test_decide_completed_task_exits_one(cli_conn, cli_ws, capsys):
+    task = _park_cli_task(cli_conn, cli_ws)
+    assert main(["decide", "approve"]) == 0
+    capsys.readouterr()
+
+    assert main(["decide", "cancel", "--task", task.id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "already 'completed'" in captured.err
+    assert len(store.list_human_decisions_for_task(cli_conn, task.id)) == 1
+
+
+# --- format_decision ----------------------------------------------------------
+
+
+def _record(status=TaskStatus.ACTIVE, action=None, decision="request_changes"):
+    now = datetime.now(UTC)
+    return DecisionRecord(
+        decision=HumanDecision(
+            id="decision-1",
+            task_id="task-1",
+            run_id="run-1",
+            decision=decision,
+            created_at=now,
+        ),
+        task=Task(
+            id="task-1",
+            title="Ship it",
+            description="",
+            status=status,
+            created_at=now,
+            updated_at=now,
+        ),
+        action=action,
+    )
+
+
+def test_format_decision_run_with_step():
+    record = _record(
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="request_changes", step="implementation"
+        )
+    )
+
+    assert format_decision(record) == (
+        "Human decision recorded: request_changes.\n"
+        "\n"
+        "Next action:\n"
+        "Run implementation.\n"
+        "\n"
+        "Start the next Run in a new Claude Code session:\n"
+        "\n"
+        "/skillflow:resolve-task task-1"
+    )
+
+
+def test_format_decision_run_with_skill_only():
+    record = _record(
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="research", skill="research"
+        )
+    )
+
+    assert format_decision(record) == (
+        "Human decision recorded: request_changes.\n"
+        "\n"
+        "Next action:\n"
+        "Run skill 'research' (reason: research).\n"
+        "\n"
+        "Task status:\n"
+        "active"
+    )
+
+
+def test_format_decision_complete():
+    record = _record(
+        status=TaskStatus.COMPLETED,
+        action=EvaluationOutput(action=ActionType.COMPLETE, reason="approve"),
+        decision="approve",
+    )
+
+    assert format_decision(record) == (
+        "Human decision recorded: approve.\n\nTask completed."
+    )
+
+
+def test_format_decision_cancel():
+    record = _record(
+        status=TaskStatus.CANCELLED,
+        action=EvaluationOutput(action=ActionType.CANCEL, reason="cancel"),
+        decision="cancel",
+    )
+
+    assert format_decision(record) == (
+        "Human decision recorded: cancel.\n\nTask cancelled."
+    )
+
+
+def test_format_decision_human_action_raises():
+    record = _record(
+        status=TaskStatus.WAITING_FOR_HUMAN,
+        action=EvaluationOutput(action=ActionType.HUMAN, reason="human_required"),
+    )
+
+    with pytest.raises(ValueError, match="must not itself produce"):
+        format_decision(record)

@@ -1,8 +1,7 @@
 """Command-line entry point for SkillFlow.
 
-``--version`` / ``--help`` plus the lifecycle subcommands implemented so far
-(``resolve-task``, ``prepare-artifacts`` and ``complete-run``; ``decide``
-remains a later issue and is deliberately not stubbed here).
+``--version`` / ``--help`` plus the lifecycle subcommands (``resolve-task``,
+``prepare-artifacts``, ``complete-run`` and ``decide``).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition/input rejection
 (the message goes to stderr), ``2`` for usage errors (argparse's own).
@@ -24,6 +23,8 @@ from skillflow.completion import (
     CompletionError,
     CompletionRequest,
 )
+from skillflow.decide import DecideError, DecisionRecord, decide
+from skillflow.decisions import DecisionError, DecisionRequest
 from skillflow.domain import Run, RunStatus
 from skillflow.evaluator import EvaluationError, WorkflowSelectionRequiredError
 from skillflow.prepare_artifacts import (
@@ -94,6 +95,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME:TYPE:PATH",
         help="Durable output submission; PATH is read as UTF-8. Repeatable.",
+    )
+    decide_parser = subparsers.add_parser(
+        "decide",
+        help="Record a human decision on the waiting Task and report the next action.",
+    )
+    decide_parser.add_argument(
+        "decision",
+        help="Human decision declared by the current step "
+        "(e.g. `approve` on a review step).",
+    )
+    decide_parser.add_argument(
+        "--task",
+        default=None,
+        dest="task",
+        help="Task id, when more than one Task is waiting for a decision.",
+    )
+    decide_parser.add_argument(
+        "--comment",
+        default=None,
+        help="Optional free-text comment stored with the decision.",
     )
     return parser
 
@@ -262,6 +283,49 @@ def format_completion(completion: RunCompletion) -> str:
     # COMPLETE / CANCEL exhaust ActionType; the Task reached a terminal status.
     lines.append("Task status:")
     lines.append(completion.task.status.value)
+    return "\n".join(lines)
+
+
+def format_decision(record: DecisionRecord) -> str:
+    """Render a ``DecisionRecord`` as human-readable text.
+
+    Pure formatting, branching on the evaluated action (SF-A-5 §7.8): a
+    ``run`` action targeting a step prints the next step with the
+    ``/skillflow:resolve-task`` pointer for a new Claude Code session; a
+    ``run`` action targeting only a skill prints the skill and reason with the
+    Task status but deliberately no resolve-task pointer (``resolve-task``
+    rejects skill-only actions with ``NoLifecycleAction``) -- both mirroring
+    :func:`format_completion`; ``complete`` / ``cancel`` print §7.8's
+    terminal sentence. A ``human`` action raises ``ValueError`` instead of
+    rendering: it is unreachable by construction (``WorkflowStep`` rejects a
+    ``decisions`` rule with ``action: human``), and printing a second
+    ``/skillflow:decide`` pointer would imply human → human is supported.
+    No lifecycle state is re-derived here.
+    """
+    lines = [f"Human decision recorded: {record.decision.decision}.", ""]
+    action = record.action
+    if action.action is ActionType.RUN:
+        lines.append("Next action:")
+        if action.step is not None:
+            lines.append(f"Run {action.step}.")
+            lines.append("")
+            lines.append("Start the next Run in a new Claude Code session:")
+            lines.append("")
+            lines.append(f"/skillflow:resolve-task {record.task.id}")
+        else:
+            lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
+            lines.append("")
+            lines.append("Task status:")
+            lines.append(record.task.status.value)
+        return "\n".join(lines)
+    if action.action is ActionType.HUMAN:
+        raise ValueError(
+            f"cannot format a 'human' decision action (reason "
+            f"{action.reason!r}); a human decision must not itself produce "
+            "another 'human' action (SF-A-5 §7.7)"
+        )
+    # COMPLETE / CANCEL exhaust ActionType; SF-A-5 §7.8's terminal sentence.
+    lines.append(f"Task {record.task.status.value}.")
     return "\n".join(lines)
 
 
@@ -510,6 +574,49 @@ def _run_complete_run(
     return 0
 
 
+def _run_decide(*, task_id: str | None, decision: str, comment: str | None) -> int:
+    """Execute ``decide``; return a process exit code."""
+    try:
+        # Pure flag-shape validation first, before touching the workspace:
+        # a blank decision is neither "absent" (that would reinterpret input)
+        # nor a valid decision (DecisionRequest would raise ValueError,
+        # which stays uncaught by convention).
+        if not decision.strip():
+            raise DecisionError(
+                "InvalidHumanDecision",
+                "empty decision; pass a decision declared by the current "
+                "step, then re-run `/skillflow:decide <decision>`",
+            )
+        ws = workspace.Workspace(root=workspace.find_repo_root())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            result = decide(
+                conn,
+                ws,
+                task_id=task_id,
+                request=DecisionRequest(decision=decision, comment=comment),
+            )
+    # Note: LookupError (the service layer's missing-entity convention) is
+    # deliberately not caught: the Task is established at the pipeline's
+    # first step, and a programming error must traceback rather than
+    # masquerade as a lifecycle rejection -- the same stance
+    # _run_complete_run documents for ValueError, which is likewise uncaught
+    # here. EvaluationError IS caught: unlike complete-run (which evaluates
+    # a freshly constructed Result), decide evaluates stored history, so
+    # the resolve-task precedent applies.
+    except (
+        DecideError,
+        DecisionError,
+        EvaluationError,
+        WorkflowLoadError,
+        WorkspaceError,
+        store.InvariantViolationError,
+    ) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(format_decision(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run SkillFlow.
 
@@ -533,6 +640,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "complete-run":
         return _run_complete_run(
             task_id=args.task, outcome=args.outcome, artifacts=args.artifact
+        )
+    if args.command == "decide":
+        return _run_decide(
+            task_id=args.task, decision=args.decision, comment=args.comment
         )
     parser.print_help()
     return 0
