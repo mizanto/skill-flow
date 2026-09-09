@@ -24,6 +24,7 @@ itself, so the command is exercised against state the system produces.
 import ast
 import contextlib
 import dataclasses
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -805,6 +806,100 @@ def test_preexisting_result_rolls_back_written_rows(conn, ws, workflows):
                 artifacts=(_submit("requirements.md", "requirements"),),
             ),
         )
+    assert _snapshot(conn, task.id, run.id) == before
+    assert sorted(p for p in ws.artifacts_dir.rglob("*") if p.is_file()) == (
+        files_before
+    )
+
+
+def test_retry_after_crash_reuses_orphan_artifact(conn, ws, workflows):
+    # A kill between the content-file write and the commit leaves an orphan
+    # file and no row; the retry reuses it when the bytes are identical and
+    # the Run completes normally.
+    _, task = _assigned(conn)
+    run_input = resolve(conn, ws, task_id=task.id)
+    run = store.get_run(conn, run_input.run_id)
+    submission = _submit("requirements.md", "requirements")
+    orphan = ws.artifacts_dir / task.id / "requirements-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text(submission.content, encoding="utf-8")
+
+    done = complete(
+        conn,
+        ws,
+        run_id=run.id,
+        request=CompletionRequest(decision="ready", artifacts=(submission,)),
+    )
+
+    assert done.run.status is RunStatus.COMPLETED
+    assert store.get_result_for_run(conn, run.id).id == done.result.id
+    (artifact,) = store.list_artifacts_for_run(conn, run.id)
+    assert artifact.version == 1
+    assert artifact.path == f"{task.id}/requirements-v1.md"
+    assert read_content(ws, artifact) == submission.content
+
+
+class _CommitFails(sqlite3.Connection):
+    """A connection whose transaction block fails at commit time.
+
+    Duplicated from ``test_artifacts.py``: ``sqlite3.Connection.commit`` is
+    a read-only C attribute and cannot be monkeypatched, and ``__exit__``
+    is where ``with conn:`` commits -- exactly the moment this test needs
+    to fail, after every file has been written inside the block. An exception
+    already in flight from the body is left alone, so only a body that ran
+    clean is failed at commit.
+    """
+
+    def __exit__(self, *exc_info):
+        if exc_info[0] is None:
+            raise sqlite3.OperationalError("commit failed")
+        return False
+
+
+def test_commit_failure_helper_leaves_body_exceptions_alone(ws):
+    # The helper fails the commit, not the body: an exception already in
+    # flight must propagate unmasked, or a test could pass vacuously.
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    try:
+        with pytest.raises(RuntimeError, match="body"):
+            with failing:
+                raise RuntimeError("body failed")
+    finally:
+        failing.close()
+
+
+def test_commit_failure_with_multiple_artifacts_rolls_back_and_unlinks(
+    conn, ws, workflows
+):
+    # The write block is one unit: a commit failure rolls back the artifact
+    # rows, the Result, the Run completion and the events -- and unlinks every
+    # file this attempt created.
+    _, task = _assigned(conn)
+    run_input = resolve(conn, ws, task_id=task.id)
+    run = store.get_run(conn, run_input.run_id)
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    failing.row_factory = sqlite3.Row
+    failing.execute("PRAGMA foreign_keys = ON")
+    files_before = sorted(p for p in ws.artifacts_dir.rglob("*") if p.is_file())
+    before = _snapshot(conn, task.id, run.id)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="commit failed"):
+            complete(
+                failing,
+                ws,
+                run_id=run.id,
+                request=CompletionRequest(
+                    decision="ready",
+                    artifacts=(
+                        _submit("requirements.md", "requirements"),
+                        _submit("notes.md", "notes"),
+                    ),
+                ),
+            )
+    finally:
+        # Closing rolls the still-open transaction back and releases the write
+        # lock, so the fixture connection can read below.
+        failing.close()
     assert _snapshot(conn, task.id, run.id) == before
     assert sorted(p for p in ws.artifacts_dir.rglob("*") if p.is_file()) == (
         files_before

@@ -733,11 +733,27 @@ class _CommitFails(sqlite3.Connection):
     Duplicated from ``test_artifacts.py``: ``sqlite3.Connection.commit`` is
     a read-only C attribute and cannot be monkeypatched, and ``__exit__``
     is where ``with conn:`` commits -- exactly the moment this test needs
-    to fail, after every file has been written inside the block.
+    to fail, after every file has been written inside the block. An exception
+    already in flight from the body is left alone, so only a body that ran
+    clean is failed at commit.
     """
 
     def __exit__(self, *exc_info):
-        raise sqlite3.OperationalError("commit failed")
+        if exc_info[0] is None:
+            raise sqlite3.OperationalError("commit failed")
+        return False
+
+
+def test_commit_failure_helper_leaves_body_exceptions_alone(ws):
+    # The helper fails the commit, not the body: an exception already in
+    # flight must propagate unmasked, or a test could pass vacuously.
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    try:
+        with pytest.raises(RuntimeError, match="body"):
+            with failing:
+                raise RuntimeError("body failed")
+    finally:
+        failing.close()
 
 
 def test_commit_failure_rolls_everything_back_and_unlinks_files(conn, ws, workflows):
@@ -769,3 +785,34 @@ def test_commit_failure_rolls_everything_back_and_unlinks_files(conn, ws, workfl
     assert _snapshot(conn, task.id, run.id) == before
     assert _files(ws) == files_before
     assert not (ws.run_dir(run.id) / "output.log").exists()
+
+
+def test_retry_after_crash_reuses_orphan_files(conn, ws, workflows):
+    # A kill between the file writes and the commit leaves orphan files and
+    # no rows; the retry reuses the artifact orphan and output.log when the
+    # bytes are identical, and the Run fails normally.
+    _, task = _assigned(conn)
+    run = _drive_to_review(conn, ws, task)
+    submission = _submit("notes.md", "notes")
+    orphan = ws.artifacts_dir / task.id / "notes-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text(submission.content, encoding="utf-8")
+    log = ws.run_dir(run.id) / workspace.OUTPUT_LOG_FILE_NAME
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("boom", encoding="utf-8")
+
+    failure = fail(
+        conn,
+        ws,
+        task_id=task.id,
+        request=FailureRequest(diagnostics="boom", artifacts=(submission,)),
+    )
+
+    assert failure.run.status is RunStatus.FAILED
+    assert failure.result.status is ResultStatus.FAILED
+    assert store.get_result_for_run(conn, run.id).id == failure.result.id
+    (artifact,) = store.list_artifacts_for_run(conn, run.id)
+    assert artifact.version == 1
+    assert read_content(ws, artifact) == submission.content
+    assert failure.diagnostics_path == f"runs/{run.id}/output.log"
+    assert log.read_text(encoding="utf-8") == "boom"

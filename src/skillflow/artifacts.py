@@ -44,9 +44,13 @@ Four boundaries are held deliberately:
 the SQLite transaction). The write is ordered so neither store can be left
 holding half of it: the file is written *inside* ``with conn:``, so a filesystem
 failure rolls the database back, and if the commit itself fails the just-written
-file is removed. A hard kill between the two is not defended against; the
-resulting drift surfaces from :func:`read_content` as an actionable
-:class:`ArtifactStorageError` rather than as a silent empty string.
+file is removed. A hard kill between the write and the commit leaves an orphan
+file and no row; the retry reuses it when it holds byte-identical content
+(SF-36) and otherwise reports drift. A kill *during* the write may leave a
+partial file, which the retry likewise reports as drift -- actionable, never
+silent. Drift that survives to a later read surfaces from :func:`read_content`
+as an actionable :class:`ArtifactStorageError` rather than as a silent empty
+string.
 """
 
 import sqlite3
@@ -149,19 +153,36 @@ def content_path(workspace: Workspace, artifact: Artifact) -> Path:
 
 def _write_new_file(
     path: Path, content: str, *, kind: str = "artifact content file"
-) -> None:
+) -> bool:
     """Create ``path`` and write ``content``. Never overwrites.
 
-    ``"x"`` is exclusive creation: an existing file means the metadata row and
-    the content file have drifted apart, which is reported rather than papered
-    over. ``newline="\\n"`` keeps stored content byte-identical across platforms.
-    ``kind`` names what is written in the error messages (``"diagnostics file"``
-    for ``output.log``) so a diagnostics failure never reports an artifact path.
+    Returns ``True`` when this call created the file, ``False`` when the file
+    already existed holding byte-identical content -- a crashed attempt's
+    orphan, reused by the retry (SF-36) rather than rewritten.
+
+    ``"x"`` is exclusive creation: an existing file with *different* content
+    means the metadata row and the content file have drifted apart, which is
+    reported rather than papered over. ``newline="\\n"`` keeps stored content
+    byte-identical across platforms. ``kind`` names what is written in the
+    error messages (``"diagnostics file"`` for ``output.log``) so a diagnostics
+    failure never reports an artifact path.
+
+    The reuse comparison is on bytes -- ``content.encode("utf-8")`` against
+    ``path.read_bytes()``. Comparing decoded text would let universal-newline
+    translation false-mismatch content containing ``\\r\\n``.
     """
     try:
         with open(path, "x", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
     except FileExistsError as exc:
+        try:
+            existing = path.read_bytes()
+        except OSError as read_exc:
+            raise ArtifactStorageError(
+                f"could not read existing {kind} {path}: {read_exc}"
+            ) from read_exc
+        if existing == content.encode("utf-8"):
+            return False
         raise ArtifactStorageError(
             f"{kind} already exists: {path}. An existing file at a "
             "new version's path means the metadata and the content store have "
@@ -169,6 +190,7 @@ def _write_new_file(
         ) from exc
     except OSError as exc:
         raise ArtifactStorageError(f"could not write {kind} {path}: {exc}") from exc
+    return True
 
 
 def register_artifact(
@@ -179,17 +201,22 @@ def register_artifact(
     name: str,
     type: str,
     content: str,
-) -> tuple[Artifact, Path]:
+) -> tuple[Artifact, Path | None]:
     """Register a new immutable Artifact version without committing.
 
     Everything :func:`create_artifact` does except the transaction: insert the
     metadata row and the ``artifact.created`` event, and write the content
-    file. Returns the Artifact and the path written.
+    file. Returns the Artifact and the path written -- or ``None`` for the
+    path when the file already held these exact bytes (a crashed attempt's
+    orphan, reused rather than rewritten).
 
     The caller owns the transaction and the orphan-file cleanup: if the
     caller's commit fails after this returns, it must unlink the returned
-    path. ``store.latest_artifact`` reads through the same connection, so
-    several calls in one uncommitted block still version correctly.
+    path when it is not ``None``. A ``None`` path must never be unlinked: the
+    file predates this attempt and may belong to another committed or
+    in-flight attempt. ``store.latest_artifact`` reads through the same
+    connection, so several calls in one uncommitted block still version
+    correctly.
 
     Raises ``LookupError`` for an unknown ``run_id``, ``ValueError`` for a name
     that is not a plain filename, a non-string ``content``, a blank ``type``, or
@@ -254,8 +281,8 @@ def register_artifact(
 
     store.insert_artifact(conn, artifact)
     store.insert_lifecycle_event(conn, event)
-    _write_new_file(path, content)
-    return artifact, path
+    created = _write_new_file(path, content)
+    return artifact, path if created else None
 
 
 def create_artifact(
@@ -282,6 +309,8 @@ def create_artifact(
 
     A single-artifact wrapper around :func:`register_artifact`: one transaction
     that commits at block exit, with orphan-file cleanup if the commit fails.
+    If the content file already holds these exact bytes (a crashed attempt's
+    orphan), it is reused and there is nothing to clean up.
 
     Raises ``LookupError`` for an unknown ``run_id``, ``ValueError`` for a name
     that is not a plain filename, a non-string ``content``, a blank ``type``, or
@@ -308,16 +337,22 @@ def create_artifact(
     return artifact
 
 
-def write_diagnostics(workspace: Workspace, *, run_id: str, content: str) -> Path:
+def write_diagnostics(
+    workspace: Workspace, *, run_id: str, content: str
+) -> Path | None:
     """Write ``content`` to ``runs/<run-id>/output.log`` (SF-A-2 §7).
 
     Diagnostic data, not a domain Artifact: no metadata row, no event, no
     version chain. A Run fails once, so the file is created exclusively --
-    an existing ``output.log`` reports drift rather than overwriting.
+    an existing ``output.log`` with different content reports drift rather
+    than overwriting.
 
+    Returns the path written, or ``None`` when the file already held these
+    exact bytes (a crashed attempt's orphan, reused rather than rewritten).
     The caller owns the transaction and the orphan-file cleanup: if the
     caller's commit fails after this returns, it must unlink the returned
-    path (the same contract as :func:`register_artifact`).
+    path when it is not ``None`` (the same contract as
+    :func:`register_artifact`).
 
     Raises ``ValueError`` for a ``run_id`` that is not a plain path component
     or a non-string ``content``, and :class:`ArtifactStorageError` if the
@@ -333,8 +368,8 @@ def write_diagnostics(workspace: Workspace, *, run_id: str, content: str) -> Pat
             f"could not create diagnostics directory {run_dir}: {exc}"
         ) from exc
     path = run_dir / OUTPUT_LOG_FILE_NAME
-    _write_new_file(path, content, kind="diagnostics file")
-    return path
+    created = _write_new_file(path, content, kind="diagnostics file")
+    return path if created else None
 
 
 def read_content(workspace: Workspace, artifact: Artifact) -> str:

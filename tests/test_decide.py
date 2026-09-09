@@ -26,6 +26,7 @@ status gates read nothing else).
 import ast
 import contextlib
 import dataclasses
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -788,6 +789,81 @@ def test_second_decide_after_approve_rejected(conn, ws, workflows):
         )
     assert exc_info.value.code == "TaskAlreadyCompleted"
     assert _snapshot(conn, task.id) == before
+
+
+def test_second_decide_after_request_changes_rejected(conn, ws, workflows):
+    # `request_changes` parks the Task back to `active`; a second decision is
+    # then unexpected, and exactly one decision row exists.
+    _, task = _assigned(conn)
+    _parked(conn, ws, task)
+    record = decide_cmd(
+        conn, ws, task_id=task.id, request=DecisionRequest(decision="request_changes")
+    )
+    assert record.task.status is TaskStatus.ACTIVE
+    before = _snapshot(conn, task.id)
+    with pytest.raises(DecideError) as exc_info:
+        decide_cmd(
+            conn, ws, task_id=task.id, request=DecisionRequest(decision="approve")
+        )
+    assert exc_info.value.code == "HumanDecisionNotExpected"
+    assert _snapshot(conn, task.id) == before
+    assert len(store.list_human_decisions_for_task(conn, task.id)) == 1
+
+
+class _CommitFails(sqlite3.Connection):
+    """A connection whose transaction block fails at commit time.
+
+    Duplicated from ``test_artifacts.py``: ``sqlite3.Connection.commit`` is
+    a read-only C attribute and cannot be monkeypatched, and ``__exit__``
+    is where ``with conn:`` commits -- exactly the moment this test needs
+    to fail, after the decision row has been written inside the block. An
+    exception already in flight from the body is left alone, so only a body
+    that ran clean is failed at commit.
+    """
+
+    def __exit__(self, *exc_info):
+        if exc_info[0] is None:
+            raise sqlite3.OperationalError("commit failed")
+        return False
+
+
+def test_commit_failure_helper_leaves_body_exceptions_alone(ws):
+    # The helper fails the commit, not the body: an exception already in
+    # flight must propagate unmasked, or a test could pass vacuously.
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    try:
+        with pytest.raises(RuntimeError, match="body"):
+            with failing:
+                raise RuntimeError("body failed")
+    finally:
+        failing.close()
+
+
+def test_commit_failure_rolls_back_decision_and_task_update(conn, ws, workflows):
+    # The write block is one unit: a commit failure rolls back the decision
+    # row, the event and the Task consequence -- the Task is still waiting
+    # with the Result unchanged.
+    _, task = _assigned(conn)
+    _parked(conn, ws, task)
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    failing.row_factory = sqlite3.Row
+    failing.execute("PRAGMA foreign_keys = ON")
+    before = _snapshot(conn, task.id)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="commit failed"):
+            decide_cmd(
+                failing,
+                ws,
+                task_id=task.id,
+                request=DecisionRequest(decision="approve"),
+            )
+    finally:
+        # Closing rolls the still-open transaction back and releases the write
+        # lock, so the fixture connection can read below.
+        failing.close()
+    assert _snapshot(conn, task.id) == before
+    assert store.get_task(conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.list_human_decisions_for_task(conn, task.id) == []
 
 
 @pytest.mark.parametrize("comment", ["", "  padded  ", "line one\nline two"])

@@ -394,6 +394,102 @@ def test_an_existing_file_at_the_target_path_is_never_overwritten(ws, conn):
     assert _artifact_rows(conn) == []
 
 
+def test_identical_orphan_file_is_reused(ws, conn):
+    # A crash between the content-file write and the commit leaves an orphan
+    # file and no row; the retry reuses it when the bytes are identical.
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("# Plan", encoding="utf-8")
+
+    artifact = create_artifact(
+        conn, ws, run_id=run_id, name="plan.md", type="plan", content="# Plan"
+    )
+
+    assert artifact.version == 1
+    assert artifact.path == f"{task_id}/plan-v1.md"
+    assert artifact.supersedes_id is None
+    assert read_content(ws, artifact) == "# Plan"
+    assert [row["id"] for row in _artifact_rows(conn)] == [artifact.id]
+
+
+def test_register_artifact_returns_none_path_when_reusing(ws, conn):
+    # The None path is the "reused, nothing to clean" signal its callers rely on.
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("# Plan", encoding="utf-8")
+
+    with conn:
+        artifact, path = register_artifact(
+            conn,
+            ws,
+            run_id=run_id,
+            name="plan.md",
+            type="plan",
+            content="# Plan",
+        )
+
+    assert path is None
+    assert artifact.version == 1
+    assert read_content(ws, artifact) == "# Plan"
+
+
+def test_reuse_compares_bytes_not_text(ws, conn):
+    # Comparing decoded text would let universal-newline translation
+    # false-mismatch content containing \r\n; the reuse check is on bytes.
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"a\r\nb")
+
+    artifact = create_artifact(
+        conn, ws, run_id=run_id, name="plan.md", type="plan", content="a\r\nb"
+    )
+
+    assert artifact.version == 1
+    assert [row["id"] for row in _artifact_rows(conn)] == [artifact.id]
+    assert (ws.artifacts_dir / task_id / "plan-v1.md").read_bytes() == b"a\r\nb"
+
+
+def test_partial_prefix_file_is_still_drift_not_reuse(ws, conn):
+    # A kill *during* the write may leave a partial file; even when it is a
+    # strict prefix of the submission it is drift, never silently completed.
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("# Pla", encoding="utf-8")
+
+    with pytest.raises(ArtifactStorageError) as exc:
+        create_artifact(
+            conn, ws, run_id=run_id, name="plan.md", type="plan", content="# Plan"
+        )
+
+    assert str(orphan) in str(exc.value)
+    assert orphan.read_text(encoding="utf-8") == "# Pla"
+    assert _artifact_rows(conn) == []
+
+
+def test_unreadable_existing_file_is_reported_actionably(ws, conn, monkeypatch):
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("# Plan", encoding="utf-8")
+
+    def boom(self):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    with pytest.raises(ArtifactStorageError) as exc:
+        create_artifact(
+            conn, ws, run_id=run_id, name="plan.md", type="plan", content="# Plan"
+        )
+
+    assert "could not read" in str(exc.value)
+    assert str(orphan) in str(exc.value)
+    assert _artifact_rows(conn) == []
+
+
 # --- Run association and the lifecycle event --------------------------------
 
 
@@ -556,11 +652,26 @@ class _CommitFails(sqlite3.Connection):
     ``sqlite3.Connection.commit`` is a read-only C attribute and cannot be
     monkeypatched, and ``__exit__`` is where ``with conn:`` commits -- which is
     exactly the moment this test needs to fail: after the content file has been
-    written inside the block.
+    written inside the block. An exception already in flight from the body is
+    left alone, so only a body that ran clean is failed at commit.
     """
 
     def __exit__(self, *exc_info):
-        raise sqlite3.OperationalError("commit failed")
+        if exc_info[0] is None:
+            raise sqlite3.OperationalError("commit failed")
+        return False
+
+
+def test_commit_failure_helper_leaves_body_exceptions_alone(ws):
+    # The helper fails the commit, not the body: an exception already in
+    # flight must propagate unmasked, or a test could pass vacuously.
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    try:
+        with pytest.raises(RuntimeError, match="body"):
+            with failing:
+                raise RuntimeError("body failed")
+    finally:
+        failing.close()
 
 
 def test_a_commit_failure_removes_the_written_file(ws, conn):
@@ -581,6 +692,36 @@ def test_a_commit_failure_removes_the_written_file(ws, conn):
 
     assert not (ws.artifacts_dir / task_id / "plan-v1.md").exists()
     assert _files(ws) == []
+    assert _artifact_rows(conn) == []
+
+
+def test_commit_failure_after_reuse_keeps_the_reused_file(ws, conn):
+    # Created-only cleanup: a reused orphan predates the attempt, so a later
+    # commit failure rolls the rows back but must not unlink the file.
+    task_id, run_id = _seed_task_run(conn)
+    orphan = ws.artifacts_dir / task_id / "plan-v1.md"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("# Plan", encoding="utf-8")
+
+    failing = sqlite3.connect(ws.db_path, factory=_CommitFails)
+    failing.row_factory = sqlite3.Row
+    failing.execute("PRAGMA foreign_keys = ON")
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            create_artifact(
+                failing,
+                ws,
+                run_id=run_id,
+                name="plan.md",
+                type="plan",
+                content="# Plan",
+            )
+    finally:
+        # Closing rolls the still-open transaction back and releases the write
+        # lock, so the fixture connection can read below.
+        failing.close()
+
+    assert orphan.read_text(encoding="utf-8") == "# Plan"
     assert _artifact_rows(conn) == []
 
 
@@ -651,6 +792,18 @@ def test_write_diagnostics_never_overwrites(ws):
     assert "diagnostics file" in str(exc_info.value)
     assert "artifact" not in str(exc_info.value)
     assert (ws.run_dir("run-1") / "output.log").read_text(encoding="utf-8") == ("first")
+
+
+def test_write_diagnostics_reuses_identical_output_log(ws):
+    # A crash between the output.log write and the commit leaves an orphan;
+    # the retry reuses it when the bytes are identical and reports None --
+    # the "nothing to clean" signal its caller relies on.
+    log = ws.run_dir("run-1") / "output.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("boom\n", encoding="utf-8")
+
+    assert write_diagnostics(ws, run_id="run-1", content="boom\n") is None
+    assert log.read_text(encoding="utf-8") == "boom\n"
 
 
 def test_write_diagnostics_rejects_non_string_content(ws):

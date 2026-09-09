@@ -38,11 +38,13 @@ error precedence (the convention every sibling module already documents):
 6  ONE TRANSACTION (`with conn:`)
      for each submission: artifacts.register_artifact(...)   # no commit;
         no required-coverage check -- partial outputs are the point (SF-A-2 §9)
+        a None path reuses a byte-identical orphan -- nothing to unlink
      store.insert_result(result) + `result.created` event
      store.update_run(failed run) + `run.failed` event
-     diagnostics given -> artifacts.write_diagnostics(...)  # no commit
-   on any exception: roll back, unlink the files written in this
-   attempt, re-raise
+     diagnostics given -> artifacts.write_diagnostics(...)  # no commit;
+        None likewise reuses a byte-identical output.log
+   on any exception: roll back, unlink the files this attempt
+   created, re-raise
 7  return RunFailure(run=..., result=..., task=..., action=...,
                      artifacts=(...), diagnostics_path=...)
 ```
@@ -413,17 +415,21 @@ def fail_run(
                     content=submission.content,
                 )
                 registered.append(artifact)
-                written.append(path)
+                if path is not None:
+                    # A None path reuses a byte-identical orphan from a crashed
+                    # attempt (SF-36): nothing this attempt created, nothing to
+                    # unlink.
+                    written.append(path)
             store.insert_result(conn, result)
             store.insert_lifecycle_event(conn, result_event)
             store.update_run(conn, failed)
             store.insert_lifecycle_event(conn, run_event)
             if request.diagnostics is not None:
-                written.append(
-                    write_diagnostics(
-                        workspace, run_id=run.id, content=request.diagnostics
-                    )
+                diagnostics_file = write_diagnostics(
+                    workspace, run_id=run.id, content=request.diagnostics
                 )
+                if diagnostics_file is not None:
+                    written.append(diagnostics_file)
     except BaseException:
         for path in written:
             # Only files this attempt wrote are dropped; a submission that

@@ -333,6 +333,29 @@ def test_workflow_equal_to_assignment_is_idempotent(conn, ws, workflows):
     assert run_input.step_id == "requirements"
 
 
+def test_failed_resolution_after_assignment_is_resumable(
+    conn, ws, workflows, monkeypatch
+):
+    # resolve-task commits the --workflow assignment before creating the Run;
+    # a failure between the two leaves a resumable state: the assignment
+    # persists, no Run exists, and the retry assigns as a no-op, then runs.
+    task = create_task(conn, title="Fresh")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(resolve_task, "create_run", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        resolve(conn, ws, task_id=task.id, workflow="software-change")
+    assert store.get_task(conn, task.id).workflow_definition_id == "software-change"
+    assert store.list_runs_for_task(conn, task.id) == []
+
+    monkeypatch.undo()
+    run_input = resolve(conn, ws, task_id=task.id)
+    assert run_input.step_id == "requirements"
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
 def test_definition_name_mismatch_names_both(conn, ws, workflows):
     task = create_task(conn, title="Unscoped")
     (workflows / "foo.yaml").write_text(

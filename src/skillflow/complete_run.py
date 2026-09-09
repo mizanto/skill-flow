@@ -42,14 +42,15 @@ error precedence (the convention every sibling module already documents):
                  exactly once -- incl. a skill Run's outcome, routed via
                  Outcome.type; a skill-targeting rule raises EvaluationError
 7  ONE TRANSACTION (`with conn:`)
-     for each submission: artifacts.register_artifact(...)   # no commit
+     for each submission: artifacts.register_artifact(...)   # no commit;
+        a None path reuses a byte-identical orphan -- nothing to unlink
      store.insert_result(result) + `result.created` event
      store.update_run(completed run) + `run.completed` event
      action is not None -> service.apply_lifecycle_action(...)  # no commit;
         Task-status consequence + `task.status_changed` event (a no-op action
         writes nothing)
-   on any exception: roll back, unlink the content files written in this
-   attempt, re-raise
+   on any exception: roll back, unlink the content files this attempt
+   created, re-raise
 8  return RunCompletion(run=..., result=..., task=..., action=..., artifacts=(...))
 ```
 
@@ -343,7 +344,11 @@ def complete_run(
                     content=submission.content,
                 )
                 registered.append(artifact)
-                written.append(path)
+                if path is not None:
+                    # A None path reuses a byte-identical orphan from a crashed
+                    # attempt (SF-36): nothing this attempt created, nothing to
+                    # unlink.
+                    written.append(path)
             store.insert_result(conn, result)
             store.insert_lifecycle_event(conn, result_event)
             store.update_run(conn, done)
