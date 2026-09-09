@@ -1,8 +1,8 @@
 """Command-line entry point for SkillFlow.
 
 ``--version`` / ``--help`` plus the lifecycle subcommands (``resolve-task``,
-``prepare-artifacts``, ``complete-run``, ``decide`` and the ``fail-run``
-operator command).
+``prepare-artifacts``, ``complete-run``, ``decide``, the ``fail-run``
+operator command and the read-only ``show-task`` debug command).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition/input rejection
 (the message goes to stderr), ``2`` for usage errors (argparse's own).
@@ -26,7 +26,7 @@ from skillflow.completion import (
 )
 from skillflow.decide import DecideError, DecisionRecord, decide
 from skillflow.decisions import DecisionError, DecisionRequest
-from skillflow.domain import Run, RunStatus
+from skillflow.domain import LifecycleEvent, Run, RunStatus
 from skillflow.evaluator import EvaluationError, WorkflowSelectionRequiredError
 from skillflow.fail_run import FailRunError, FailureRequest, RunFailure, fail_run
 from skillflow.prepare_artifacts import (
@@ -36,6 +36,7 @@ from skillflow.prepare_artifacts import (
 )
 from skillflow.resolve_task import ResolveTaskError, resolve_task
 from skillflow.run_input import RunInput
+from skillflow.show_task import RunView, ShowTaskError, TaskView, show_task
 from skillflow.workflow import ActionType
 from skillflow.workflow_loader import WorkflowLoadError
 from skillflow.workspace import WorkspaceError
@@ -147,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME:TYPE:PATH",
         help="Partial durable output submission; PATH is read as UTF-8. Repeatable.",
     )
+    show_parser = subparsers.add_parser(
+        "show-task",
+        help="Show a Task's lifecycle: runs, results, artifacts, decisions, events.",
+    )
+    show_parser.add_argument("task_id", help="The Task to inspect.")
     return parser
 
 
@@ -410,6 +416,134 @@ def format_failure(failure: RunFailure) -> str:
     return "\n".join(lines)
 
 
+def format_task_view(view: TaskView) -> str:
+    """Render a ``TaskView`` as human-readable text.
+
+    Pure formatting: the Task header (id, title, status, workflow
+    assignment, description when non-empty, created/updated timestamps),
+    one block per Run in view order (status, stored step and workflow,
+    provenance, started/completed timestamps, Result with outcome and
+    diagnostics reference, artifact references, recorded decisions),
+    then the lifecycle events in chronological order with their payloads
+    as sorted ``k=v`` pairs. Empty sections render as explicit
+    ``none``/``none recorded`` lines rather than erroring. No lifecycle
+    state is re-derived here.
+    """
+    task = view.task
+    lines = [f"Task {task.id}: {task.title} ({task.status.value})"]
+    if task.description:
+        lines.append(f"Description: {task.description}")
+    if task.workflow_definition_id is not None:
+        lines.append(f"Workflow: {task.workflow_definition_id}")
+    else:
+        lines.append("Workflow: none assigned")
+    lines.append(
+        f"Created: {task.created_at.isoformat()} Updated: {task.updated_at.isoformat()}"
+    )
+    lines.append("")
+    if not view.runs:
+        lines.append("Runs: none")
+    else:
+        lines.append(f"Runs ({len(view.runs)}):")
+        for index, run_view in enumerate(view.runs, start=1):
+            lines.append("")
+            lines.extend(_format_run_view(index, run_view))
+    lines.append("")
+    if not view.events:
+        lines.append("Events: none recorded")
+    else:
+        lines.append(f"Events ({len(view.events)}):")
+        for event in view.events:
+            lines.append(_format_event(event))
+    return "\n".join(lines)
+
+
+def _format_run_view(index: int, run_view: RunView) -> list[str]:
+    """Render one numbered Run block of a task view.
+
+    Pure formatting over stored fields only: a missing step or workflow
+    renders as ``none`` (no definition is consulted and no skill is
+    inferred), a missing Result as ``none``, and empty artifact/decision
+    lists as ``none`` lines.
+    """
+    run = run_view.run
+    step = f"step {run.step_id!r}" if run.step_id is not None else "step none"
+    if run.workflow_definition_id is not None:
+        workflow = f"workflow {run.workflow_definition_id!r}"
+    else:
+        workflow = "workflow none"
+    lines = [f"  [{index}] {run.id} ({run.status.value}) -- {step}, {workflow}"]
+    if run.triggered_by_run_id is None:
+        trigger = (
+            run.trigger_reason if run.trigger_reason is not None else "none recorded"
+        )
+        lines.append(f"      trigger: {trigger}")
+    else:
+        lines.append(
+            f"      trigger: {run.trigger_reason!r} "
+            f"from run {run.triggered_by_run_id!r}"
+        )
+    started = run.started_at.isoformat() if run.started_at is not None else "none"
+    if run.completed_at is not None:
+        completed = run.completed_at.isoformat()
+    else:
+        completed = "none"
+    lines.append(f"      started: {started}  completed: {completed}")
+    result = run_view.result
+    if result is None:
+        lines.append("      Result: none")
+    else:
+        lines.append(f"      Result {result.id} ({result.status.value})")
+        if result.outcome is None:
+            lines.append("        outcome: none")
+        else:
+            lines.append(
+                f"        outcome: {result.outcome.type}/{result.outcome.decision}"
+            )
+        if result.metadata is not None and "diagnostics" in result.metadata:
+            lines.append(f"        diagnostics: {result.metadata['diagnostics']}")
+    if not run_view.artifacts:
+        lines.append("      Artifacts: none")
+    else:
+        lines.append("      Artifacts:")
+        for artifact in run_view.artifacts:
+            lines.append(
+                f"        - {artifact.name} ({artifact.type} "
+                f"v{artifact.version}) id {artifact.id} path {artifact.path}"
+            )
+    if not run_view.decisions:
+        lines.append("      Decisions: none")
+    else:
+        lines.append("      Decisions:")
+        for decision in run_view.decisions:
+            lines.append(
+                f"        - {decision.decision!r} id {decision.id} "
+                f"at {decision.created_at.isoformat()}"
+            )
+            if decision.comment is not None:
+                lines.append(f"          comment: {decision.comment}")
+    return lines
+
+
+def _format_event(event: LifecycleEvent) -> str:
+    """Render one lifecycle event line: timestamp, type, run, payload.
+
+    Pure formatting: the run segment is omitted for task-only events and
+    the payload renders as sorted ``k=v`` pairs (empty when absent), so
+    the output is deterministic for any event type, including ones this
+    version never emits.
+    """
+    parts = [event.created_at.isoformat(), event.type.value]
+    if event.run_id is not None:
+        parts.append(f"run {event.run_id}")
+    if event.payload:
+        pairs = ", ".join(
+            f"{key}={event.payload[key]}" for key in sorted(event.payload)
+        )
+        parts.append(pairs)
+    return "  " + " ".join(parts)
+
+
 #: Unchanged-state sentence appended to every rejection of each command
 #: (SF-37). Each sentence is true on EVERY exit-1 path of its command:
 #: ``resolve-task`` rejects only before Run creation (step 9), so it claims
@@ -424,6 +558,7 @@ _UNCHANGED_STATE = {
     "complete-run": "No Result was created; no Run status was changed.",
     "decide": "No decision was recorded; no Task status was changed.",
     "fail-run": "No failure was recorded; no Run status was changed.",
+    "show-task": "Nothing was changed: this command only inspects state.",
 }
 
 
@@ -846,6 +981,27 @@ def _run_fail_run(
     return 0
 
 
+def _run_show_task(*, task_id: str) -> int:
+    """Execute ``show-task``; return a process exit code."""
+    try:
+        ws = workspace.Workspace(root=workspace.find_repo_root())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            result = show_task(conn, task_id=task_id)
+    # Note: only the layers this command calls are caught. show-task
+    # performs deterministic reads -- it never writes, evaluates the
+    # lifecycle, loads a Workflow, or creates a Run, so the invariant,
+    # evaluation, loader, and service classes its siblings list are
+    # unreachable here and would be dead code.
+    except (
+        ShowTaskError,
+        WorkspaceError,
+    ) as exc:
+        print(format_error("show-task", exc), file=sys.stderr)
+        return 1
+    print(format_task_view(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run SkillFlow.
 
@@ -881,5 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
             diagnostics_file=args.diagnostics_file,
             artifacts=args.artifact,
         )
+    if args.command == "show-task":
+        return _run_show_task(task_id=args.task_id)
     parser.print_help()
     return 0

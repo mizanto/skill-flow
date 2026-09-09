@@ -371,3 +371,18 @@ was created, or no Result was created and no Run status changed.
 | `InvalidDiagnostics` | Blank `--message`, or unreadable/non-UTF-8 diagnostics file | Fix the flag or file, re-run |
 | `InvalidArtifactSubmission` | Submission malformed, file unreadable/non-UTF-8, name invalid or duplicate, or type-chain mismatch | Fix the `NAME:TYPE:PATH` spec or file, re-run |
 
+## Inspection
+
+`skillflow show-task <task-id>` prints a read-only debug view of a Task
+lifecycle: current status, Runs in order with provenance, per-Run
+Results, artifact references, recorded decisions, and the chronological
+lifecycle events ([`show_task.py`](../src/skillflow/show_task.py)). It
+changes nothing — viewing records no events — and works for any Task
+status, including terminal Tasks, and without any events present:
+statuses always come from domain rows, never from event replay (SF-A-2
+§1).
+
+It is a CLI-only operator command like `fail-run`: there is no
+`/skillflow:show-task` skill. The only rejection is `TaskNotFound`
+(check the id).
+

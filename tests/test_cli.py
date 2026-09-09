@@ -2008,3 +2008,138 @@ def test_command_in_uninitialised_repo_points_at_init_workspace(
     assert "init_workspace" in captured.err
     assert "run init_workspace first" not in captured.err
     assert captured.err.splitlines()[-1] == "No Run was created."
+
+
+# --- show-task (SF-38) -----------------------------------------------------
+
+
+def test_show_task_renders_running_lifecycle_view(cli_conn, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["show-task", task.id]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = captured.out
+    assert f"Task {task.id}: Ship it (active)" in out
+    assert "Workflow: software-change" in out
+    assert "Runs (1):" in out
+    assert f"[1] {run.id} (running)" in out
+    assert "step 'requirements'" in out
+    assert "trigger: initial" in out
+    assert "Result: none" in out
+    assert "Artifacts: none" in out
+    assert "Decisions: none" in out
+    assert "Events (2):" in out
+    assert "task.created" in out
+    assert "run.created" in out
+
+
+def test_show_task_unknown_task_exits_one_with_envelope(cli_conn, capsys):
+    assert main(["show-task", "task-nope"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "task-nope" in captured.err
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow show-task: TaskNotFound: ")
+    assert lines[-1] == "Nothing was changed: this command only inspects state."
+
+
+def test_show_task_completed_lifecycle_without_workflow_files(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    review = _drive_cli_to_review(cli_conn, cli_ws, task)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="approved",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.COMPLETED
+    # The view reads stored rows only: deleting every definition file must
+    # not change a byte of it.
+    for child in cli_ws.workflows_dir.iterdir():
+        child.unlink()
+    cli_ws.workflows_dir.rmdir()
+    capsys.readouterr()
+
+    assert main(["show-task", task.id]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = captured.out
+    assert f"Task {task.id}:" in out
+    assert "(completed)" in out
+    assert "Runs (4):" in out
+    assert review.id in out
+    assert "review/approved" in out
+    assert "requirements.md (requirements v1)" in out
+    assert "plan.md (plan v1)" in out
+    assert "review.md (review v1)" in out
+    assert "Artifacts: none" in out
+    assert "run.created" in out
+    assert "result.created" in out
+    assert "task.status_changed" in out
+
+
+def test_show_task_failed_run_shows_diagnostics(cli_conn, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    assert main(["fail-run", "--message", "boom"]) == 0
+    capsys.readouterr()
+
+    assert main(["show-task", task.id]) == 0
+
+    out = capsys.readouterr().out
+    assert f"{run.id} (failed)" in out
+    assert f"diagnostics: runs/{run.id}/output.log" in out
+
+
+def test_show_task_skill_targeted_run_renders_without_step(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="fundamental_assumption_wrong",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+    assert main(["resolve-task", task.id]) == 0
+    skill_run = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert skill_run.step_id is None
+    capsys.readouterr()
+
+    assert main(["show-task", task.id]) == 0
+
+    out = capsys.readouterr().out
+    assert skill_run.id in out
+    assert "step none" in out
+    assert "Result: none" in out
+
+
+def test_show_task_task_without_events_renders_empty_sections(cli_conn, capsys):
+    now = datetime.now(UTC)
+    task = Task(
+        id="task-raw",
+        title="Raw",
+        description="",
+        status=TaskStatus.ACTIVE,
+        created_at=now,
+        updated_at=now,
+    )
+    with cli_conn:
+        store.insert_task(cli_conn, task)
+
+    assert main(["show-task", task.id]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Workflow: none assigned" in captured.out
+    assert "Runs: none" in captured.out
+    assert "Events: none recorded" in captured.out
