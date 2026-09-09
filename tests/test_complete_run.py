@@ -1,4 +1,4 @@
-"""Tests for ``skillflow.complete_run`` (SF-23).
+"""Tests for ``skillflow.complete_run`` (SF-23, SF-24).
 
 Following ``test_prepare_artifacts.py``'s shape: a ``tmp_path`` workspace
 fixture with a ``.git`` marker, ``store.open_store``, and the **real**
@@ -10,13 +10,15 @@ itself, so the command is exercised against state the system produces.
 * **Contract change-detectors** -- the public surface, ``CompleteRunError``
   (type and ``code`` attribute), the ``RunCompletion`` validation, the AST
   import boundary (no Claude Code launch of any kind), the banned-concept
-  scan, and the absence of an ``evaluator`` import (the mechanical form of
-  "no Lifecycle Evaluation here" -- SF-24 will relax that test deliberately).
+  scan, and the presence of the ``evaluator`` import (the mechanical form of
+  "Lifecycle Evaluation happens here" -- SF-24 flipped the SF-23 absence
+  test deliberately).
 * **Behaviour tests** -- every rejection path proving the snapshot is
   byte-identical afterwards (the mechanical form of "a rejection leaves the
   Run ``running`` with nothing written"), and every success path proving the
   single atomic write (artifacts registered, exactly one Result, Run
-  completed, no Task write, no next Run).
+  completed, lifecycle evaluated with its Task consequence applied, no next
+  Run).
 """
 
 import ast
@@ -46,7 +48,8 @@ from skillflow.domain import (
     RunStatus,
     TaskStatus,
 )
-from skillflow.evaluator import EvaluationOutput
+from skillflow.evaluator import REASON_NO_OUTCOME, EvaluationOutput
+from skillflow.resolve_task import ResolveTaskError
 from skillflow.resolve_task import resolve_task as resolve
 from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType
@@ -165,6 +168,8 @@ def test_run_completion_fields_match_contract():
     assert {f.name for f in dataclasses.fields(RunCompletion)} == {
         "run",
         "result",
+        "task",
+        "action",
         "artifacts",
     }
 
@@ -172,7 +177,7 @@ def test_run_completion_fields_match_contract():
 def test_run_completion_is_frozen_slotted_keyword_only():
     from datetime import UTC, datetime
 
-    from skillflow.domain import Result, Run
+    from skillflow.domain import Result, Run, Task
 
     params = RunCompletion.__dataclass_params__
     assert params.frozen and params.kw_only
@@ -190,16 +195,25 @@ def test_run_completion_is_frozen_slotted_keyword_only():
             status=ResultStatus.COMPLETED,
             created_at=now,
         ),
+        task=Task(
+            id="task-1",
+            title="Ship it",
+            description="",
+            status=TaskStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        ),
     )
+    assert instance.action is None
     assert not hasattr(instance, "__dict__")
     with pytest.raises(dataclasses.FrozenInstanceError):
         instance.artifacts = ()
 
 
-def _valid_run_and_result():
+def _valid_run_result_and_task():
     from datetime import UTC, datetime
 
-    from skillflow.domain import Run
+    from skillflow.domain import Run, Task
 
     now = datetime.now(UTC)
     run = Run(
@@ -214,21 +228,33 @@ def _valid_run_and_result():
         status=ResultStatus.COMPLETED,
         created_at=now,
     )
-    return run, result
+    task = Task(
+        id="task-1",
+        title="Ship it",
+        description="",
+        status=TaskStatus.ACTIVE,
+        created_at=now,
+        updated_at=now,
+    )
+    return run, result, task
 
 
 def test_run_completion_rejects_bad_members():
-    run, result = _valid_run_and_result()
+    run, result, task = _valid_run_result_and_task()
     with pytest.raises(ValueError, match="must be a Run"):
-        RunCompletion(run="run-1", result=result)
+        RunCompletion(run="run-1", result=result, task=task)
     with pytest.raises(ValueError, match="must be a Result"):
-        RunCompletion(run=run, result="result-1")
+        RunCompletion(run=run, result="result-1", task=task)
+    with pytest.raises(ValueError, match="must be a Task"):
+        RunCompletion(run=run, result=result, task="task-1")
+    with pytest.raises(ValueError, match="must be an EvaluationOutput or None"):
+        RunCompletion(run=run, result=result, task=task, action="run")
     with pytest.raises(ValueError, match="artifacts must be an iterable"):
-        RunCompletion(run=run, result=result, artifacts="review.md")
+        RunCompletion(run=run, result=result, task=task, artifacts="review.md")
     with pytest.raises(ValueError, match="artifacts must be an iterable"):
-        RunCompletion(run=run, result=result, artifacts=123)
+        RunCompletion(run=run, result=result, task=task, artifacts=123)
     with pytest.raises(ValueError, match="must contain Artifact"):
-        RunCompletion(run=run, result=result, artifacts=(123,))
+        RunCompletion(run=run, result=result, task=task, artifacts=(123,))
 
 
 def test_module_imports_are_within_the_boundary():
@@ -274,7 +300,9 @@ def test_no_excluded_lifecycle_concepts_present():
     assert not offenders
 
 
-def test_module_does_not_evaluate():
+def test_module_evaluates_via_evaluator():
+    # SF-24 deliberately flipped the SF-23 absence test: importing the pure
+    # evaluator is the mechanical form of "Lifecycle Evaluation happens here".
     source = Path(complete_run_pkg.__file__).read_text()
     tree = ast.parse(source)
     imported: set[str] = set()
@@ -283,7 +311,7 @@ def test_module_does_not_evaluate():
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
-    assert "skillflow.evaluator" not in imported
+    assert "skillflow.evaluator" in imported
 
 
 # --- rejection paths (nothing written) --------------------------------------
@@ -433,9 +461,25 @@ def test_skill_targeted_run_with_decision_rejected(conn, ws, workflows):
         )
     assert exc_info.value.code == "OutcomeNotExpected"
     assert _snapshot(conn, task.id, skill_run.id) == before
+    task_before = store.get_task(conn, task.id)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
     done = complete(conn, ws, run_id=skill_run.id, request=CompletionRequest())
     assert done.run.status is RunStatus.COMPLETED
     assert done.result.outcome is None
+    # A skill-targeted Run keeps its SF-23 semantics: no evaluation, no Task
+    # change -- only the Result and the Run completion land.
+    assert done.action is None
+    assert done.task == task_before
+    assert store.get_task(conn, task.id) == task_before
+    assert sorted(_event_types(conn, task.id, 2)) == sorted(
+        [
+            LifecycleEventType.RESULT_CREATED,
+            LifecycleEventType.RUN_COMPLETED,
+        ]
+    )
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 2
+    )
 
 
 def test_step_absent_from_definition_rejected(conn, ws, workflows):
@@ -586,18 +630,25 @@ def test_review_completion_registers_result_and_artifact(conn, ws, workflows):
     assert artifact.version == 1
     assert artifact.path == f"{task.id}/review-v1.md"
     assert read_content(ws, artifact) == "# Review"
-    # A multiset comparison: the three rows share one `created_at`, so the
-    # store's (created_at, id) order between them is uuid noise.
-    assert sorted(_event_types(conn, task.id, 3)) == sorted(
+    # `approved` evaluates to `complete`, so the Task consequence lands in the
+    # same write: one more event than the SF-23 three. A multiset comparison:
+    # the four rows share one `created_at`, so the store's (created_at, id)
+    # order between them is uuid noise.
+    assert sorted(_event_types(conn, task.id, 4)) == sorted(
         [
             LifecycleEventType.ARTIFACT_CREATED,
             LifecycleEventType.RESULT_CREATED,
             LifecycleEventType.RUN_COMPLETED,
+            LifecycleEventType.TASK_STATUS_CHANGED,
         ]
     )
     assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
-        events_before + 3
+        events_before + 4
     )
+    assert done.action.action is ActionType.COMPLETE
+    assert done.action.reason == "approved"
+    assert done.task.status is TaskStatus.COMPLETED
+    assert store.get_task(conn, task.id) == done.task
     persisted_run = store.get_run(conn, run.id)
     assert persisted_run.status is RunStatus.COMPLETED
     assert store.get_result_for_run(conn, run.id).id == done.result.id
@@ -612,6 +663,11 @@ def test_step_with_no_outputs_or_outcomes_completes(conn, ws, workflows):
     assert done.run.status is RunStatus.COMPLETED
     assert done.result.outcome is None
     assert done.artifacts == ()
+    # The outcome-less step keeps its REASON_NO_OUTCOME meaning: the Task ends.
+    assert done.action.action is ActionType.COMPLETE
+    assert done.action.reason == REASON_NO_OUTCOME
+    assert done.task.status is TaskStatus.COMPLETED
+    assert store.get_task(conn, task.id).status is TaskStatus.COMPLETED
 
 
 def test_already_registered_output_needs_no_resubmission(conn, ws, workflows):
@@ -743,11 +799,15 @@ def test_second_completion_is_rejected_with_one_result(conn, ws, workflows):
     )
 
 
-def test_completion_has_no_lifecycle_consequence(conn, ws, workflows):
+def test_run_action_leaves_task_active_with_no_status_event(conn, ws, workflows):
+    # `changes_requested` evaluates to `run`, whose Task consequence (ACTIVE)
+    # is a no-op on an active Task: no write, no status-change event -- but the
+    # evaluated action is still returned, and no next Run is created here.
     _, task = _assigned(conn)
     updated_before = store.get_task(conn, task.id).updated_at
     run = _drive_to_review(conn, ws, task)
-    complete(
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    done = complete(
         conn,
         ws,
         run_id=run.id,
@@ -756,9 +816,17 @@ def test_completion_has_no_lifecycle_consequence(conn, ws, workflows):
             artifacts=(_submit("review.md", "review"),),
         ),
     )
+    assert done.action.action is ActionType.RUN
+    assert done.action.step == "implementation"
+    assert done.action.reason == "changes_requested"
+    assert done.task.status is TaskStatus.ACTIVE
     after = store.get_task(conn, task.id)
     assert after.status is TaskStatus.ACTIVE
     assert after.updated_at == updated_before
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 3  # artifact.created, result.created, run.completed
+    )
+    assert LifecycleEventType.TASK_STATUS_CHANGED not in _event_types(conn, task.id, 3)
     assert len(store.list_runs_for_task(conn, task.id)) == 4
 
 
@@ -784,3 +852,244 @@ def test_rejected_then_corrected_succeeds(conn, ws, workflows):
     )
     assert done.run.status is RunStatus.COMPLETED
     assert done.result.outcome.decision == "ready"
+
+
+# --- lifecycle consequences (SF-24) ------------------------------------------
+
+
+def test_human_action_parks_task_and_blocks_resolve(conn, ws, workflows):
+    _, task = _assigned(conn)
+    run = _drive_to_review(conn, ws, task)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    done = complete(
+        conn,
+        ws,
+        run_id=run.id,
+        request=CompletionRequest(
+            decision="human_required",
+            artifacts=(_submit("review.md", "review"),),
+        ),
+    )
+    assert done.action.action is ActionType.HUMAN
+    assert done.action.reason == "human_required"
+    assert done.task.status is TaskStatus.WAITING_FOR_HUMAN
+    after = store.get_task(conn, task.id)
+    assert after.status is TaskStatus.WAITING_FOR_HUMAN
+    assert after.updated_at > task.updated_at
+    assert sorted(_event_types(conn, task.id, 4)) == sorted(
+        [
+            LifecycleEventType.ARTIFACT_CREATED,
+            LifecycleEventType.RESULT_CREATED,
+            LifecycleEventType.RUN_COMPLETED,
+            LifecycleEventType.TASK_STATUS_CHANGED,
+        ]
+    )
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 4
+    )
+    (status_event,) = [
+        e
+        for e in store.list_lifecycle_events_for_task(conn, task.id)
+        if e.type is LifecycleEventType.TASK_STATUS_CHANGED
+    ]
+    assert status_event.run_id == run.id
+    assert dict(status_event.payload) == {
+        "from": "active",
+        "to": "waiting_for_human",
+        "action": "human",
+        "reason": "human_required",
+    }
+    assert len(store.list_runs_for_task(conn, task.id)) == 4
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "HumanDecisionRequired"
+
+
+def test_complete_action_finishes_task_and_blocks_resolve(conn, ws, workflows):
+    _, task = _assigned(conn)
+    run = _drive_to_review(conn, ws, task)
+    done = complete(
+        conn,
+        ws,
+        run_id=run.id,
+        request=CompletionRequest(
+            decision="approved",
+            artifacts=(_submit("review.md", "review"),),
+        ),
+    )
+    assert done.action.action is ActionType.COMPLETE
+    assert done.task.status is TaskStatus.COMPLETED
+    assert store.get_task(conn, task.id).status is TaskStatus.COMPLETED
+    assert LifecycleEventType.TASK_STATUS_CHANGED in _event_types(conn, task.id, 4)
+    assert len(store.list_runs_for_task(conn, task.id)) == 4
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "TaskAlreadyCompleted"
+
+
+def test_skill_targeted_action_leaves_task_active(conn, ws, workflows):
+    # `fundamental_assumption_wrong` evaluates to a skill-targeted `run`: the
+    # skill rides on the returned action, and the Task consequence is silent.
+    _, task = _assigned(conn)
+    updated_before = store.get_task(conn, task.id).updated_at
+    run = _drive_to_review(conn, ws, task)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    done = complete(
+        conn,
+        ws,
+        run_id=run.id,
+        request=CompletionRequest(
+            decision="fundamental_assumption_wrong",
+            artifacts=(_submit("review.md", "review"),),
+        ),
+    )
+    assert done.action.action is ActionType.RUN
+    assert done.action.skill == "research"
+    assert done.action.step is None
+    assert store.get_task(conn, task.id).status is TaskStatus.ACTIVE
+    assert store.get_task(conn, task.id).updated_at == updated_before
+    assert LifecycleEventType.TASK_STATUS_CHANGED not in _event_types(conn, task.id, 3)
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 3
+    )
+    assert len(store.list_runs_for_task(conn, task.id)) == 4
+
+
+def _abortable_task(conn, workflows):
+    """A Task on a minimal workflow whose only outcome cancels the Task.
+
+    No step of the reference workflow maps an outcome to `cancel` (it appears
+    only in `decisions`), so the cancel consequence is exercised here instead.
+    """
+    (workflows / "abortable.yaml").write_text(
+        "name: abortable\n"
+        "steps:\n"
+        "  - id: only\n"
+        "    skill: do-it\n"
+        "    outcomes:\n"
+        "      abort: { action: cancel }\n",
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflows / "abortable.yaml")
+    register_workflow(conn, workflow)
+    return create_task(conn, title="Abortable", workflow_definition_id="abortable")
+
+
+def test_cancel_action_cancels_task(conn, ws, workflows):
+    task = _abortable_task(conn, workflows)
+    run_input = resolve(conn, ws, task_id=task.id)
+    assert run_input.step_id == "only"
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    done = complete(
+        conn,
+        ws,
+        run_id=run_input.run_id,
+        request=CompletionRequest(decision="abort"),
+    )
+    assert done.action.action is ActionType.CANCEL
+    assert done.action.reason == "abort"
+    assert done.task.status is TaskStatus.CANCELLED
+    assert store.get_task(conn, task.id).status is TaskStatus.CANCELLED
+    assert sorted(_event_types(conn, task.id, 3)) == sorted(
+        [
+            LifecycleEventType.RESULT_CREATED,
+            LifecycleEventType.RUN_COMPLETED,
+            LifecycleEventType.TASK_STATUS_CHANGED,
+        ]
+    )
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 3
+    )
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
+def test_evaluate_is_called_exactly_once_with_completed_snapshots(
+    conn, ws, workflows, monkeypatch
+):
+    # Patched where `complete_run` looks it up: its local `evaluate` binding.
+    calls = []
+    real_evaluate = complete_run_pkg.evaluate
+
+    def counting(evaluation):
+        calls.append(evaluation)
+        return real_evaluate(evaluation)
+
+    _, task = _assigned(conn)
+    run = _drive_to_review(conn, ws, task)
+    monkeypatch.setattr(complete_run_pkg, "evaluate", counting)
+    complete(
+        conn,
+        ws,
+        run_id=run.id,
+        request=CompletionRequest(
+            decision="approved",
+            artifacts=(_submit("review.md", "review"),),
+        ),
+    )
+    (evaluation,) = calls
+    assert evaluation.task.id == task.id
+    assert evaluation.current_run.status is RunStatus.COMPLETED
+    assert evaluation.result.run_id == run.id
+    assert evaluation.result.outcome.decision == "approved"
+
+
+def test_skill_targeted_completion_never_evaluates(conn, ws, workflows, monkeypatch):
+    def boom(_evaluation):
+        raise AssertionError("evaluate() must not run for a skill-targeted Run")
+
+    _, task = _assigned(conn)
+    run_input = resolve(conn, ws, task_id=task.id)
+    first = store.get_run(conn, run_input.run_id)
+    complete(
+        conn,
+        ws,
+        run_id=first.id,
+        request=CompletionRequest(
+            decision="ready",
+            artifacts=(_submit("requirements.md", "requirements"),),
+        ),
+    )
+    skill_run = create_run(
+        conn,
+        task_id=task.id,
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="research", skill="research"
+        ),
+        triggered_by_run_id=first.id,
+    )
+    monkeypatch.setattr(complete_run_pkg, "evaluate", boom)
+    done = complete(conn, ws, run_id=skill_run.id, request=CompletionRequest())
+    assert done.action is None
+
+
+def test_task_consequence_failure_rolls_everything_back(
+    conn, ws, workflows, monkeypatch
+):
+    # The Task consequence joins the single write block: a failure there rolls
+    # back the Result, the Run completion, the Task update, the events, the
+    # artifact rows -- and unlinks the artifact files this attempt wrote.
+    real_apply = complete_run_pkg.apply_lifecycle_action
+
+    def boom(conn, **kwargs):
+        real_apply(conn, **kwargs)  # the Task write really happens first
+        raise RuntimeError("consequence write failed")
+
+    _, task = _assigned(conn)
+    run = _drive_to_review(conn, ws, task)
+    monkeypatch.setattr(complete_run_pkg, "apply_lifecycle_action", boom)
+    files_before = sorted(p for p in ws.artifacts_dir.rglob("*") if p.is_file())
+    before = _snapshot(conn, task.id, run.id)
+    with pytest.raises(RuntimeError, match="consequence write failed"):
+        complete(
+            conn,
+            ws,
+            run_id=run.id,
+            request=CompletionRequest(
+                decision="approved",
+                artifacts=(_submit("review.md", "review"),),
+            ),
+        )
+    assert _snapshot(conn, task.id, run.id) == before
+    assert sorted(p for p in ws.artifacts_dir.rglob("*") if p.is_file()) == (
+        files_before
+    )

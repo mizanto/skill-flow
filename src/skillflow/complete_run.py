@@ -1,10 +1,11 @@
-"""Atomic Run completion (SF-23).
+"""Atomic Run completion with Lifecycle Evaluation (SF-23, SF-24).
 
 The operation that finishes a Run: validate the Run's required artifacts and
 its reported outcome, register the artifacts, create the one canonical
-Result, and complete the Run -- all as one atomic unit, so a rejection leaves
-the Run ``running`` with nothing written (SF-A-5 §6.4-§6.7, §6.11). One
-pipeline, executed in order -- the order is the contract, because it fixes
+Result, complete the Run, evaluate the lifecycle, and apply the evaluated
+action's Task-status consequence -- all as one atomic unit, so a rejection
+leaves the Run ``running`` with nothing written (SF-A-5 §6.4-§6.9, §6.11).
+One pipeline, executed in order -- the order is the contract, because it fixes
 error precedence (the convention every sibling module already documents):
 
 ```text
@@ -24,24 +25,35 @@ error precedence (the convention every sibling module already documents):
      step is None -> request.decision must be None, else OutcomeNotExpected
      else         -> completion.validate_outcome(step=step, request=request)
                      -> Outcome | None; CompletionError propagates
-6  ONE TRANSACTION (`with conn:`)
+6  LIFECYCLE EVALUATION (SF-A-5 §6.8, pure, reads only)
+     load Task (runs.task_id FK guarantees it; LookupError is unreachable)
+     build the Result and completed-Run snapshots (single `now`)
+     step is None -> action = None (a skill-targeted Run has no outcome
+                     rules; the Task is left unchanged)
+     else         -> evaluate(EvaluationInput(task, definition, done, result))
+                     exactly once
+7  ONE TRANSACTION (`with conn:`)
      for each submission: artifacts.register_artifact(...)   # no commit
      store.insert_result(result) + `result.created` event
      store.update_run(completed run) + `run.completed` event
-   on any exception: unlink the content files written in this attempt, re-raise
-7  return RunCompletion(run=..., result=..., artifacts=(...))
+     action is not None -> service.apply_lifecycle_action(...)  # no commit;
+        Task-status consequence + `task.status_changed` event (a no-op action
+        writes nothing)
+   on any exception: roll back, unlink the content files written in this
+   attempt, re-raise
+8  return RunCompletion(run=..., result=..., task=..., action=..., artifacts=(...))
 ```
 
-Steps 1-5 are **reads only**. Every rejection therefore happens before the
+Steps 1-6 are **reads only**. Every rejection therefore happens before the
 single write block, which is the mechanical form of the first acceptance
-criterion -- the same structure ``resolve-task`` uses. Step 6's failures (a
+criterion -- the same structure ``resolve-task`` uses. Step 7's failures (a
 pre-existing Result, an illegal transition, a bad artifact name, a filesystem
-error) roll the transaction back, so the Run is still ``running`` and no
-Result exists there either.
+error, a Task-consequence failure) roll the transaction back, so the Run is
+still ``running`` and no Result exists there either.
 
-Explicit non-goals -- **no Lifecycle Evaluation, no Task-status change, no
-next Run, no Claude Code launch** (SF-24 owns evaluation and the Task update;
-SF-25 owns the ``/skillflow:complete-run`` command and its CLI wiring).
+Explicit non-goals -- **no next Run, no Claude Code launch** (the evaluated
+``run`` action is returned for the user to start in a new session; SF-25 owns
+the ``/skillflow:complete-run`` command and its CLI wiring).
 """
 
 import sqlite3
@@ -60,8 +72,11 @@ from skillflow.domain import (
     ResultStatus,
     Run,
     RunStatus,
+    Task,
 )
+from skillflow.evaluator import EvaluationInput, EvaluationOutput, evaluate
 from skillflow.outputs import validate_outputs
+from skillflow.service import apply_lifecycle_action
 from skillflow.store import get_run, list_artifacts_for_run
 from skillflow.workflow_loader import load_definition
 from skillflow.workspace import Workspace
@@ -98,10 +113,14 @@ class CompleteRunError(Exception):
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RunCompletion:
     """What completion produced: the completed Run, its one canonical Result,
-    and the Artifacts registered by this call (in submission order)."""
+    the Task in its post-completion state, the evaluated lifecycle action
+    (``None`` for a skill-targeted Run, which has no outcome rules), and the
+    Artifacts registered by this call (in submission order)."""
 
     run: Run
     result: Result
+    task: Task
+    action: EvaluationOutput | None = None
     artifacts: tuple[Artifact, ...] = ()
 
     def __post_init__(self) -> None:
@@ -109,6 +128,10 @@ class RunCompletion:
             raise ValueError("RunCompletion.run must be a Run")
         if not isinstance(self.result, Result):
             raise ValueError("RunCompletion.result must be a Result")
+        if not isinstance(self.task, Task):
+            raise ValueError("RunCompletion.task must be a Task")
+        if self.action is not None and not isinstance(self.action, EvaluationOutput):
+            raise ValueError("RunCompletion.action must be an EvaluationOutput or None")
         if isinstance(self.artifacts, str):
             raise ValueError("RunCompletion.artifacts must be an iterable")
         try:
@@ -154,6 +177,7 @@ def complete_run(
             f"`skillflow resolve-task {run.task_id}`",
         )
 
+    definition = None
     if run.workflow_definition_id is None or run.step_id is None:
         step = None
     else:
@@ -204,6 +228,14 @@ def complete_run(
     else:
         outcome = validate_outcome(step=step, request=request)
 
+    # The Task is loaded here, after every rejection, so the steps 1-5 error
+    # precedence is untouched. `runs.task_id` is a foreign key, so a missing
+    # Task is unreachable except via raw SQL; LookupError matches the service
+    # convention for "no task with id".
+    task = store.get_task(conn, run.task_id)
+    if task is None:
+        raise LookupError(f"no task with id {run.task_id!r}")
+
     now = datetime.now(UTC)
     result = Result(
         id=_new_id("result"),
@@ -213,6 +245,16 @@ def complete_run(
         outcome=outcome,
     )
     done = replace(run, status=RunStatus.COMPLETED, completed_at=now)
+    if step is None:
+        action = None
+    else:
+        # `definition` is not None here: step is only set from it. Evaluated
+        # once, before the write block, against the completed snapshots.
+        action = evaluate(
+            EvaluationInput(
+                task=task, workflow=definition, current_run=done, result=result
+            )
+        )
     result_payload = {"result_id": result.id, "status": result.status.value}
     if outcome is not None:
         result_payload["outcome_type"] = outcome.type
@@ -256,10 +298,17 @@ def complete_run(
             store.insert_lifecycle_event(conn, result_event)
             store.update_run(conn, done)
             store.insert_lifecycle_event(conn, run_event)
+            if action is not None:
+                # Transaction-neutral: joins this write block, commits with it.
+                task = apply_lifecycle_action(
+                    conn, task=task, action=action, run_id=run.id, now=now
+                )
     except BaseException:
         for path in written:
             # Only files this attempt wrote are dropped; a submission that
             # failed to write never reaches this list.
             path.unlink(missing_ok=True)
         raise
-    return RunCompletion(run=done, result=result, artifacts=tuple(registered))
+    return RunCompletion(
+        run=done, result=result, task=task, action=action, artifacts=tuple(registered)
+    )

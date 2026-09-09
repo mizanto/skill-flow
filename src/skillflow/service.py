@@ -14,6 +14,13 @@ Task needs all three, so they live here and nowhere else:
    functions never commit (see the ``store`` module docstring): pushing
    atomicity of that pair onto every caller is the alternative, and it is worse.
 
+   The one exception is :func:`apply_lifecycle_action`, which is
+   **transaction-neutral**: it writes via ``store`` and never commits, so the
+   caller -- ``complete-run`` (SF-24), ``decide`` (SF-27) -- can apply the
+   evaluated action's Task consequence inside its own atomic write block. It
+   must therefore only ever be called from inside a ``with conn:`` block owned
+   by the caller.
+
 **Workflow identity rule (v0):** a Workflow Definition's persisted id *is* its
 ``Workflow.name``. ``Workflow`` carries no id; a Task must reference a stable
 string, not a filesystem path (paths are not portable between checkouts); and
@@ -72,6 +79,7 @@ __all__ = [
     "create_task",
     "assign_workflow",
     "create_run",
+    "apply_lifecycle_action",
 ]
 
 #: Task statuses that forbid Workflow assignment: a Workflow governs future
@@ -447,3 +455,95 @@ def create_run(
             ),
         )
     return run
+
+
+#: The evaluated-action -> Task-status consequence (SF-A-5 §6.9 / §7.7),
+#: centralised here so ``complete-run`` (SF-24) and ``decide`` (SF-27) cannot
+#: disagree. ``run`` keeps the Task ``active`` -- the next Run is created later
+#: by ``resolve-task`` in a new session, never here.
+_ACTION_TASK_STATUS = {
+    ActionType.RUN: TaskStatus.ACTIVE,
+    ActionType.HUMAN: TaskStatus.WAITING_FOR_HUMAN,
+    ActionType.COMPLETE: TaskStatus.COMPLETED,
+    ActionType.CANCEL: TaskStatus.CANCELLED,
+}
+
+
+def apply_lifecycle_action(
+    conn: sqlite3.Connection,
+    *,
+    task: Task,
+    action: EvaluationOutput,
+    run_id: str | None = None,
+    now: datetime | None = None,
+) -> Task:
+    """Apply an evaluated lifecycle action's Task-status consequence (SF-24).
+
+    The shared action -> status mapping for the two commands that evaluate the
+    lifecycle: ``complete-run`` applies a Result-driven action (SF-A-5 §6.9),
+    ``decide`` a Human-Decision-driven one (§7.7). On a real status change the
+    ``tasks`` row and one ``task.status_changed`` lifecycle event are written;
+    the Task is returned in its post-application state.
+
+    Transaction-neutral -- the deliberate exception to this module's "service
+    functions own the transaction" convention (see the module docstring): this
+    never commits, so the caller applies the consequence inside its own atomic
+    write block. Call it only from inside a ``with conn:`` block.
+
+    Rules, evaluated in this order (the order is the contract -- it fixes error
+    precedence):
+
+    1. ``action`` must be an :class:`~skillflow.evaluator.EvaluationOutput` ->
+       ``ValueError`` (matching :func:`create_run`).
+    2. ``task`` must be a :class:`~skillflow.domain.Task` -> ``ValueError``.
+    3. The Task must exist -> ``LookupError`` (matching
+       :func:`assign_workflow`, :func:`create_run`). The current status is read
+       from the stored row, not from the passed object, so a stale caller
+       cannot resurrect an overwritten status.
+    4. If the target status equals the stored status, return the stored Task
+       unchanged -- no write, no event, no ``updated_at`` bump (matching
+       :func:`assign_workflow`'s idempotent no-op). A ``run`` action on an
+       ``active`` Task is therefore silent.
+    5. Otherwise write ``store.update_task`` plus exactly one
+       ``task.status_changed`` event carrying the causing ``run_id`` when given
+       and the string-only payload ``{"from", "to", "action", "reason"}``.
+       ``updated_at`` and the event share ``now`` (``datetime.now(UTC)`` read
+       once when not supplied, so ``complete-run`` reuses its own stamp).
+
+    Non-goals: it never chooses the action, never validates the action against
+    a Workflow (the evaluator already did), never creates a Run, and never
+    touches any row but this Task's.
+    """
+    if not isinstance(action, EvaluationOutput):
+        raise ValueError("apply_lifecycle_action() action must be an EvaluationOutput")
+    if not isinstance(task, Task):
+        raise ValueError("apply_lifecycle_action() task must be a Task")
+
+    stored = store.get_task(conn, task.id)
+    if stored is None:
+        raise LookupError(f"no task with id {task.id!r}")
+
+    target = _ACTION_TASK_STATUS[action.action]
+    if stored.status is target:
+        return stored
+
+    stamp = datetime.now(UTC) if now is None else now
+    updated = replace(stored, status=target, updated_at=stamp)
+    store.update_task(conn, updated)
+    store.insert_lifecycle_event(
+        conn,
+        LifecycleEvent(
+            id=_new_id("event"),
+            task_id=updated.id,
+            run_id=run_id,
+            type=LifecycleEventType.TASK_STATUS_CHANGED,
+            payload={
+                "from": stored.status.value,
+                "to": target.value,
+                "action": action.action.value,
+                "reason": action.reason,
+            },
+            created_at=stamp,
+        ),
+    )
+    return updated

@@ -15,7 +15,9 @@ Two kinds of test, matching ``test_store.py`` / ``test_workspace.py``:
   subsequent provenance, the ``running`` status with no ``pending`` state, the
   ``run.created`` event with no ``run.started``, every rejection path proving no
   write, error precedence, atomicity, and the wave-5 vertical slice over the
-  real reference definition), and the SF-8 -> SF-9 integration path through the
+  real reference definition), ``apply_lifecycle_action`` (the action -> status
+  mapping for every ``ActionType``, the status no-op, transaction neutrality,
+  and every rejection path), and the SF-8 -> SF-9 integration path through the
   real reference definition.
 """
 
@@ -48,6 +50,7 @@ from skillflow.service import (
     RunCreationError,
     UnknownWorkflowError,
     WorkflowAssignmentError,
+    apply_lifecycle_action,
     assign_workflow,
     create_run,
     create_task,
@@ -91,6 +94,7 @@ def test_public_surface():
         "create_task",
         "assign_workflow",
         "create_run",
+        "apply_lifecycle_action",
     }
 
 
@@ -955,3 +959,183 @@ def test_vertical_slice_initial_then_subsequent_run(conn):
     assert second.step_id == "decomposition"
     assert second.trigger_reason == "ready"
     assert second.triggered_by_run_id == first.id
+
+
+# --- apply_lifecycle_action --------------------------------------------
+
+
+def _action(action, reason, **target):
+    return EvaluationOutput(action=action, reason=reason, **target)
+
+
+def test_apply_lifecycle_action_takes_task_and_action_as_keywords(conn):
+    # Both are keyword-only with no default: the caller must supply the stored
+    # Task and the resolved action, so nothing here can select either.
+    sig = inspect.signature(apply_lifecycle_action)
+    for name in ("task", "action"):
+        param = sig.parameters[name]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    ("action", "from_status", "to_status"),
+    [
+        (
+            _action(ActionType.RUN, "request_changes", step="implementation"),
+            TaskStatus.WAITING_FOR_HUMAN,
+            TaskStatus.ACTIVE,
+        ),
+        (
+            _action(ActionType.HUMAN, "human_required"),
+            TaskStatus.ACTIVE,
+            TaskStatus.WAITING_FOR_HUMAN,
+        ),
+        (
+            _action(ActionType.COMPLETE, "approved"),
+            TaskStatus.ACTIVE,
+            TaskStatus.COMPLETED,
+        ),
+        (
+            _action(ActionType.CANCEL, "cancel"),
+            TaskStatus.ACTIVE,
+            TaskStatus.CANCELLED,
+        ),
+    ],
+)
+def test_apply_lifecycle_action_mapping(conn, action, from_status, to_status):
+    task = create_task(conn, title="Consequential")
+    task = _force_status(conn, task, from_status)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+
+    with conn:
+        updated = apply_lifecycle_action(conn, task=task, action=action)
+
+    assert updated.status is to_status
+    assert store.get_task(conn, task.id) == updated
+    events = store.list_lifecycle_events_for_task(conn, task.id)
+    assert len(events) == events_before + 1
+    (event,) = events[events_before:]
+    assert event.type is LifecycleEventType.TASK_STATUS_CHANGED
+    # The clock is read once: the event shares the Task's new stamp (which may
+    # predate the +1s `_force_status` stamp above -- the direction is not the
+    # contract, the single stamp is).
+    assert event.created_at == updated.updated_at
+    assert updated.updated_at != task.updated_at
+    assert dict(event.payload) == {
+        "from": from_status.value,
+        "to": to_status.value,
+        "action": action.action.value,
+        "reason": action.reason,
+    }
+
+
+def test_apply_lifecycle_action_covers_every_action_type():
+    # A new ActionType member without a mapping row is a contract change, not
+    # a silent KeyError at runtime.
+    assert set(service._ACTION_TASK_STATUS) == set(ActionType)
+
+
+def test_apply_lifecycle_action_carries_run_id_and_reuses_now(conn):
+    from datetime import UTC, datetime
+
+    workflow, task = _bound_task(conn, title="Stamped")
+    run = create_run(conn, task_id=task.id, action=_initial(workflow, task))
+    now = datetime.now(UTC) + timedelta(seconds=30)
+    action = _action(ActionType.COMPLETE, "approved")
+
+    with conn:
+        updated = apply_lifecycle_action(
+            conn, task=task, action=action, run_id=run.id, now=now
+        )
+
+    assert updated.updated_at == now
+    (event,) = store.list_lifecycle_events_for_task(conn, task.id)[-1:]
+    assert event.run_id == run.id
+    assert event.created_at == now
+
+
+def test_apply_lifecycle_action_no_op_writes_nothing(conn):
+    task = create_task(conn, title="Steady")
+    before = store.get_task(conn, task.id)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    action = _action(ActionType.RUN, "ready", step="decomposition")
+
+    with conn:
+        updated = apply_lifecycle_action(conn, task=task, action=action)
+
+    assert updated == before
+    assert updated.updated_at == before.updated_at
+    assert store.get_task(conn, task.id) == before
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == events_before
+
+
+def test_apply_lifecycle_action_does_not_commit(conn, ws):
+    task = create_task(conn, title="Uncommitted")
+    action = _action(ActionType.HUMAN, "human_required")
+
+    apply_lifecycle_action(conn, task=task, action=action)
+    assert conn.in_transaction  # the write is still pending: no commit happened
+    conn.rollback()
+
+    with contextlib.closing(store.open_store(ws)) as reopened:
+        assert store.get_task(reopened, task.id).status is TaskStatus.ACTIVE
+        assert len(store.list_lifecycle_events_for_task(reopened, task.id)) == 1
+
+
+def test_apply_lifecycle_action_missing_task_raises_lookup_error(conn):
+    task = create_task(conn, title="Gone")
+    ghost = replace(task, id="task-missing")
+    action = _action(ActionType.COMPLETE, "approved")
+
+    with pytest.raises(LookupError, match="no task"):
+        apply_lifecycle_action(conn, task=ghost, action=action)
+
+    assert _rows(conn, "tasks") != []
+    assert store.get_task(conn, task.id).status is TaskStatus.ACTIVE
+
+
+def test_apply_lifecycle_action_rejects_a_non_evaluation_output(conn):
+    task = create_task(conn, title="Bad action")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(ValueError, match="EvaluationOutput"):
+        apply_lifecycle_action(conn, task=task, action="complete")
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
+
+
+def test_apply_lifecycle_action_rejects_a_non_task(conn):
+    action = _action(ActionType.COMPLETE, "approved")
+
+    with pytest.raises(ValueError, match="must be a Task"):
+        apply_lifecycle_action(conn, task="task-1", action=action)
+
+    assert _rows(conn, "tasks") == []
+    assert _rows(conn, "lifecycle_events") == []
+
+
+def test_apply_lifecycle_action_shape_precedes_the_missing_task_check(conn):
+    # Rule 1 (action must be an EvaluationOutput) beats rule 3 (Task exists).
+    ghost = replace(create_task(conn, title="Gone"), id="task-missing")
+
+    with pytest.raises(ValueError, match="EvaluationOutput"):
+        apply_lifecycle_action(conn, task=ghost, action="complete")
+
+
+def test_apply_lifecycle_action_rejects_a_naive_now(conn):
+    from datetime import datetime
+
+    task = create_task(conn, title="Naive")
+    before = store.get_task(conn, task.id)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        with conn:
+            apply_lifecycle_action(
+                conn,
+                task=task,
+                action=_action(ActionType.COMPLETE, "approved"),
+                now=datetime.now(),
+            )
+
+    _assert_task_and_events_unchanged(conn, task.id, before, 1)
