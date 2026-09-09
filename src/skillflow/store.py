@@ -100,6 +100,7 @@ __all__ = [
     "get_result_for_run",
     "latest_artifact",
     "list_runs_for_task",
+    "list_running_runs",
     "list_artifacts_for_task",
     "list_artifacts_for_run",
     "list_human_decisions_for_task",
@@ -791,6 +792,23 @@ def list_runs_for_task(conn: sqlite3.Connection, task_id: str) -> list[Run]:
     """Return every Run for ``task_id``, ordered by ``created_at, id``."""
     rows = conn.execute(
         "SELECT * FROM runs WHERE task_id = ? ORDER BY created_at, id", (task_id,)
+    ).fetchall()
+    return [_to_run(row) for row in rows]
+
+
+def list_running_runs(conn: sqlite3.Connection) -> list[Run]:
+    """Return every Run with ``status = 'running'``, ordered by ``created_at, id``.
+
+    The workspace-wide half of :func:`list_runs_for_task`: ``prepare-artifacts``
+    is invoked with no Task id (SF-A-5 §5.1), and ``complete-run`` will need
+    the same query (SF-A-5 §6.2), so the current Run is found by status.
+    ``runs_one_running_per_task`` bounds this to
+    one row per Task, not one row overall -- a workspace with two active Tasks
+    legitimately returns two, and disambiguating is the caller's job.
+    """
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE status = ? ORDER BY created_at, id",
+        (RunStatus.RUNNING.value,),
     ).fetchall()
     return [_to_run(row) for row in rows]
 

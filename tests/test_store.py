@@ -55,6 +55,7 @@ from skillflow.store import (
     list_artifacts_for_task,
     list_human_decisions_for_task,
     list_lifecycle_events_for_task,
+    list_running_runs,
     list_runs_for_task,
     open_store,
     update_run,
@@ -204,6 +205,7 @@ def test_public_surface():
         "get_result_for_run",
         "latest_artifact",
         "list_runs_for_task",
+        "list_running_runs",
         "list_artifacts_for_task",
         "list_artifacts_for_run",
         "list_human_decisions_for_task",
@@ -1535,3 +1537,56 @@ def test_open_store_rejects_a_database_stamped_with_an_old_version(ws):
         con.close()
     with pytest.raises(SchemaVersionError):
         open_store(ws)
+
+
+# --- list_running_runs ----------------------------------------------------
+
+
+def _stored_task(conn, **over):
+    task = _task(**over)
+    with conn:
+        insert_task(conn, task)
+    return task
+
+
+def _stored_run(conn, **over):
+    run = _run(**over)
+    with conn:
+        insert_run(conn, run)
+    return run
+
+
+def test_list_running_runs_on_empty_database_returns_empty(conn):
+    assert list_running_runs(conn) == []
+
+
+def test_list_running_runs_returns_the_running_run(conn):
+    _stored_task(conn)
+    run = _stored_run(conn)
+    assert list_running_runs(conn) == [run]
+
+
+def test_list_running_runs_returns_one_row_per_task_in_order(conn):
+    _stored_task(conn, id="task-a")
+    _stored_task(conn, id="task-b")
+    # Deliberately out-of-order ids: ordering is by (created_at, id).
+    _stored_run(conn, id="run-b", task_id="task-b", created_at=LATER)
+    run_a = _stored_run(conn, id="run-a", task_id="task-a", created_at=EARLIER)
+    run_b = get_run(conn, "run-b")
+    assert list_running_runs(conn) == [run_a, run_b]
+
+
+def test_list_running_runs_excludes_non_running_runs(conn):
+    _stored_task(conn)
+    _stored_run(conn, id="run-done", status=RunStatus.COMPLETED)
+    _stored_run(conn, id="run-failed", status=RunStatus.FAILED)
+    assert list_running_runs(conn) == []
+
+
+def test_completed_run_disappears_from_list_running_runs(conn):
+    _stored_task(conn)
+    run = _stored_run(conn)
+    assert list_running_runs(conn) == [run]
+    with conn:
+        update_run(conn, dataclasses.replace(run, status=RunStatus.COMPLETED))
+    assert list_running_runs(conn) == []

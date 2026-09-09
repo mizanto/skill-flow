@@ -1,7 +1,7 @@
 """Command-line entry point for SkillFlow.
 
 ``--version`` / ``--help`` plus the lifecycle subcommands implemented so far
-(``resolve-task``; ``prepare-artifacts``, ``complete-run`` and ``decide``
+(``resolve-task`` and ``prepare-artifacts``; ``complete-run`` and ``decide``
 remain later issues and are deliberately not stubbed here).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition rejection
@@ -16,6 +16,11 @@ import sys
 
 from skillflow import __version__, service, store, workspace
 from skillflow.evaluator import EvaluationError, WorkflowSelectionRequiredError
+from skillflow.prepare_artifacts import (
+    ArtifactReport,
+    PrepareArtifactsError,
+    prepare_artifacts,
+)
 from skillflow.resolve_task import ResolveTaskError, resolve_task
 from skillflow.run_input import RunInput
 from skillflow.workflow_loader import WorkflowLoadError
@@ -45,6 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--workflow",
         default=None,
         help="Workflow Definition id to assign (required when the Task has none).",
+    )
+    prepare_parser = subparsers.add_parser(
+        "prepare-artifacts",
+        help="Report the current Run's expected durable outputs (existing/missing).",
+    )
+    prepare_parser.add_argument(
+        "--task",
+        default=None,
+        dest="task",
+        help="Task id, when more than one Run is running in this workspace.",
     )
     return parser
 
@@ -103,6 +118,90 @@ def format_run_input(run_input: RunInput) -> str:
     return "\n".join(lines)
 
 
+def format_artifact_report(report: ArtifactReport) -> str:
+    """Render an ``ArtifactReport`` as human-readable text.
+
+    Pure formatting: the Run id and ``running`` status, its step and Task,
+    one ``✓`` / ``✗`` line per declared output in declaration order, then the
+    closing block -- SF-A-5 §5.3's all-ready recommendation of
+    ``/skillflow:complete-run`` when every required output is satisfied, else
+    §5.4's guidance naming each missing type and its ``required`` flag. A
+    satisfied check lists every matching artifact as ``name vN``,
+    comma-separated (a Run may register several versions of one output). No
+    lifecycle state is re-derived here.
+    """
+    lines = [
+        f"Run {report.run_id} (running) "
+        f"-- step {report.step_id!r} of task {report.task_id}",
+    ]
+    checks = report.validation.checks
+    if not checks:
+        lines.append("Expected outputs: none declared")
+    else:
+        lines.append("Expected outputs:")
+        lines.append("")
+        for check in checks:
+            if check.satisfied:
+                matched = ", ".join(
+                    f"{artifact.name} v{artifact.version}"
+                    for artifact in check.artifacts
+                )
+                lines.append(f"✓ {check.type} ({matched})")
+            elif check.required:
+                lines.append(f"✗ {check.type} (required)")
+            else:
+                lines.append(f"✗ {check.type} (optional)")
+    lines.append("")
+    if report.validation.is_complete:
+        lines.append("All required artifacts are already prepared.")
+        lines.append("")
+        lines.append("You can now run:")
+        lines.append("")
+        lines.append("/skillflow:complete-run")
+    else:
+        missing = report.validation.missing_required
+        heading = (
+            "Please create the missing artifact:"
+            if len(missing) == 1
+            else "Please create the missing artifacts:"
+        )
+        lines.append(heading)
+        lines.append("")
+        for check in missing:
+            lines.append(f"- type: {check.type}")
+            lines.append(f"  required: {str(check.required).lower()}")
+            lines.append("")
+        lines.append(
+            "Create each missing output as a normal file with ordinary "
+            "Claude Code tools, then run:"
+        )
+        lines.append("")
+        lines.append("/skillflow:complete-run")
+    return "\n".join(lines)
+
+
+def _run_prepare_artifacts(*, task_id: str | None) -> int:
+    """Execute ``prepare-artifacts``; return a process exit code."""
+    try:
+        ws = workspace.Workspace(root=workspace.find_repo_root())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            result = prepare_artifacts(conn, ws, task_id=task_id)
+    # Note: only the layers this command calls are caught. prepare-artifacts
+    # performs deterministic reads (store, workflow_loader) -- it never
+    # evaluates the lifecycle or creates a Run, so the service/evaluator/store
+    # invariant classes its sibling resolve-task lists are unreachable here
+    # and would be dead code.
+    except (
+        PrepareArtifactsError,
+        WorkflowLoadError,
+        WorkspaceError,
+    ) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(format_artifact_report(result))
+    return 0
+
+
 def _run_resolve_task(*, task_id: str, workflow: str | None) -> int:
     """Execute ``resolve-task``; return a process exit code."""
     try:
@@ -149,5 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "resolve-task":
         return _run_resolve_task(task_id=args.task_id, workflow=args.workflow)
+    if args.command == "prepare-artifacts":
+        return _run_prepare_artifacts(task_id=args.task)
     parser.print_help()
     return 0
