@@ -125,13 +125,33 @@ reviews" — it is not a transition. Rework routing stays in
 | Shape | Rule | Meaning |
 |-------|------|---------|
 | Continue to a step | `{action: run, step: <id>}` | Next Run executes workflow step `<id>`. |
-| Continue to a skill | `{action: run, skill: <name>}` | Next Run executes skill `<name>` with no workflow step (SF-A-4 §9). |
+| Continue to a skill | `{action: run, skill: <name>}` | Next Run executes skill `<name>` with no workflow step (SF-A-4 §9; see Skill-targeted Runs below). |
 | Request a human decision | `{action: human}` | Task → `waiting_for_human`. |
 | Finish | `{action: complete}` | Task → `completed`. |
 | Abandon | `{action: cancel}` | Task → `cancelled`. |
 
 `run` requires **exactly one** of `step` / `skill`. `human` / `complete` /
 `cancel` must carry neither.
+
+### Skill-targeted Runs
+
+A `run` action carrying only `skill` creates a Run with no workflow step
+(SF-A-4 §9). The v0 runtime meaning is SF-32's gap-fill (no specification
+defines it; a spec follow-up is recorded):
+
+- **RunInput**: `step_id` is `None`; `skill` comes from the action;
+  `model` / `effort` are `None`; `outputs` is empty; context is the
+  triggering Run's artifacts grouped by type
+  (`skillflow.context.select_trigger_context`).
+- **Completion**: a decision is validated against the triggering step's
+  outcome table and persisted with that step as `Outcome.type`; a
+  decisionless skill Run completes with no outcome and no action.
+- **Evaluation**: the outcome is interpreted through the step named by
+  `Outcome.type`. A skill-targeted Run resolves to a step, `human`,
+  `complete`, or `cancel` — never to another skill-targeted Run.
+- **Protocol**: `prepare-artifacts` has no declared outputs to inspect and
+  keeps reporting `StepUnresolved`; `decide` resolves its step from the
+  outcome that parked the Task.
 
 ## Validation rules
 
@@ -256,7 +276,7 @@ steps:
     skill: decomposition
     model: opus
     effort: high
-    context: [requirements]                         # artifact types this step consumes
+    context: [requirements, research]               # 'research' resolves only on a post-research re-decomposition (SF-32)
     outputs:
       - type: plan
         required: true
@@ -283,6 +303,7 @@ steps:
       approved:                     { action: complete }                     # A: happy path
       changes_requested:            { action: run, step: implementation }     # B: review / rework
       fundamental_assumption_wrong: { action: run, skill: research }          # C: skill target, not a step
+      replan:                       { action: run, step: decomposition }      # C: the skill Run's continuation edge (SF-32)
       human_required:               { action: human }                        # D: human decision
     decisions:
       approve:         { action: complete }                                  # D
@@ -296,5 +317,5 @@ steps:
 |----------|-----------------------------|
 | **A — happy path** | Each step's `ready` outcome is `run` to the next step; `review/approved` is `complete`. |
 | **B — review / rework** | `review/changes_requested` is `run` with `step: implementation`. No `Rework` / `Loop` entity. |
-| **C — fundamental assumption wrong** | `review/fundamental_assumption_wrong` is `run` with `skill: research` (`step` is `None`); `research` is not a step and is not validated. |
+| **C — fundamental assumption wrong** | `review/fundamental_assumption_wrong` is `run` with `skill: research` (`step` is `None`); `research` is not a step and is not validated. `review/replan` is `run` with `step: decomposition` — the skill Run's continuation edge (SF-32); `decomposition` consumes `research`. |
 | **D — human decision** | `review/human_required` is `human`; then `decisions` maps `approve → complete`, `request_changes → run/implementation`, `cancel → cancel`. A decision never maps back to `human`. |

@@ -127,12 +127,25 @@ def format_run_input(run_input: RunInput) -> str:
     step id/skill/model/effort, the selected context artifacts (name, type,
     version) with unresolved declared types as an informational line, the
     expected outputs with ``required`` flags, and a closing block naming the
-    next command. No lifecycle state is re-derived here.
+    next command. A skill-targeted Run (``step_id`` ``None``, SF-32) prints
+    a skill-forward header with no step line and closes with the
+    ``/skillflow:complete-run`` pointer -- it declares no outputs for
+    ``/skillflow:prepare-artifacts`` to inspect. No lifecycle state is
+    re-derived here.
     """
+    if run_input.step_id is None:
+        run_line = (
+            f"Run {run_input.run_id} (running) "
+            f"-- skill {run_input.skill!r} (no workflow step)"
+        )
+    else:
+        run_line = (
+            f"Run {run_input.run_id} (running) "
+            f"-- step {run_input.step_id!r} via skill {run_input.skill!r}"
+        )
     lines = [
         f"Task {run_input.task_id}: {run_input.task_title}",
-        f"Run {run_input.run_id} (running) "
-        f"-- step {run_input.step_id!r} via skill {run_input.skill!r}",
+        run_line,
     ]
     if run_input.task_description:
         lines.append(f"Description: {run_input.task_description}")
@@ -166,10 +179,16 @@ def format_run_input(run_input: RunInput) -> str:
             )
     else:
         lines.append("Expected outputs: none declared")
-    lines.append(
-        "Next: do the bounded work for this step, then run "
-        "`/skillflow:prepare-artifacts`."
-    )
+    if run_input.step_id is None:
+        lines.append(
+            "Next: do the bounded work for this skill, then run "
+            "`/skillflow:complete-run`."
+        )
+    else:
+        lines.append(
+            "Next: do the bounded work for this step, then run "
+            "`/skillflow:prepare-artifacts`."
+        )
     return "\n".join(lines)
 
 
@@ -241,14 +260,14 @@ def format_completion(completion: RunCompletion) -> str:
     Pure formatting, branching on the evaluated action (SF-A-5 §6.10): a
     ``run`` action targeting a step prints the next step with the
     ``/skillflow:resolve-task`` pointer for a new Claude Code session; a
-    ``run`` action targeting only a skill prints the skill and reason with the
-    Task status but deliberately no resolve-task pointer (``resolve-task``
-    rejects skill-only actions with ``NoLifecycleAction``); ``human`` prints
-    the ``/skillflow:decide`` pointer; ``complete`` / ``cancel`` print the
-    terminal Task status (§6.10 has no cancel template, so its shape is
-    derived from §6.9); a ``None`` action (a skill-targeted Run, which has no
-    outcome rules) reports that no lifecycle action applies with the unchanged
-    Task status. No lifecycle state is re-derived here.
+    ``run`` action targeting only a skill prints the skill and reason with
+    the same pointer (skill-targeted Runs resolve since SF-32); ``human``
+    prints the ``/skillflow:decide`` pointer; ``complete`` / ``cancel``
+    print the terminal Task status (§6.10 has no cancel template, so its
+    shape is derived from §6.9); a ``None`` action (a decisionless
+    skill-targeted Run, which has no outcome rules) reports that no
+    lifecycle action applies with the unchanged Task status. No lifecycle
+    state is re-derived here.
     """
     lines = [f"Run {completion.run.id} completed.", ""]
     action = completion.action
@@ -262,15 +281,12 @@ def format_completion(completion: RunCompletion) -> str:
         lines.append("Next action:")
         if action.step is not None:
             lines.append(f"Run {action.step}.")
-            lines.append("")
-            lines.append("Start the next Run in a new Claude Code session:")
-            lines.append("")
-            lines.append(f"/skillflow:resolve-task {completion.task.id}")
         else:
             lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
-            lines.append("")
-            lines.append("Task status:")
-            lines.append(completion.task.status.value)
+        lines.append("")
+        lines.append("Start the next Run in a new Claude Code session:")
+        lines.append("")
+        lines.append(f"/skillflow:resolve-task {completion.task.id}")
         return "\n".join(lines)
     if action.action is ActionType.HUMAN:
         lines.append("Next action:")
@@ -292,15 +308,14 @@ def format_decision(record: DecisionRecord) -> str:
     Pure formatting, branching on the evaluated action (SF-A-5 §7.8): a
     ``run`` action targeting a step prints the next step with the
     ``/skillflow:resolve-task`` pointer for a new Claude Code session; a
-    ``run`` action targeting only a skill prints the skill and reason with the
-    Task status but deliberately no resolve-task pointer (``resolve-task``
-    rejects skill-only actions with ``NoLifecycleAction``) -- both mirroring
-    :func:`format_completion`; ``complete`` / ``cancel`` print §7.8's
-    terminal sentence. A ``human`` action raises ``ValueError`` instead of
-    rendering: it is unreachable by construction (``WorkflowStep`` rejects a
-    ``decisions`` rule with ``action: human``), and printing a second
-    ``/skillflow:decide`` pointer would imply human → human is supported.
-    No lifecycle state is re-derived here.
+    ``run`` action targeting only a skill prints the skill and reason with
+    the same pointer (skill-targeted Runs resolve since SF-32) -- both
+    mirroring :func:`format_completion`; ``complete`` / ``cancel`` print
+    §7.8's terminal sentence. A ``human`` action raises ``ValueError``
+    instead of rendering: it is unreachable by construction
+    (``WorkflowStep`` rejects a ``decisions`` rule with ``action: human``),
+    and printing a second ``/skillflow:decide`` pointer would imply
+    human → human is supported. No lifecycle state is re-derived here.
     """
     lines = [f"Human decision recorded: {record.decision.decision}.", ""]
     action = record.action
@@ -308,15 +323,12 @@ def format_decision(record: DecisionRecord) -> str:
         lines.append("Next action:")
         if action.step is not None:
             lines.append(f"Run {action.step}.")
-            lines.append("")
-            lines.append("Start the next Run in a new Claude Code session:")
-            lines.append("")
-            lines.append(f"/skillflow:resolve-task {record.task.id}")
         else:
             lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
-            lines.append("")
-            lines.append("Task status:")
-            lines.append(record.task.status.value)
+        lines.append("")
+        lines.append("Start the next Run in a new Claude Code session:")
+        lines.append("")
+        lines.append(f"/skillflow:resolve-task {record.task.id}")
         return "\n".join(lines)
     if action.action is ActionType.HUMAN:
         raise ValueError(
@@ -559,10 +571,14 @@ def _run_complete_run(
     # deliberately not caught: the Task is FK-guaranteed behind the resolved
     # Run, and a programming error must traceback rather than masquerade as
     # a lifecycle rejection -- the same stance _run_resolve_task documents
-    # for ValueError, which is likewise uncaught here.
+    # for ValueError, which is likewise uncaught here. EvaluationError IS
+    # caught: a skill-targeted Run resolving to another skill is rejected at
+    # evaluation (SF-32), so unlike a step Run -- whose validated decision
+    # always maps -- complete-run can surface it.
     except (
         CompleteRunError,
         CompletionError,
+        EvaluationError,
         WorkflowLoadError,
         WorkspaceError,
         ArtifactStorageError,
@@ -600,9 +616,9 @@ def _run_decide(*, task_id: str | None, decision: str, comment: str | None) -> i
     # first step, and a programming error must traceback rather than
     # masquerade as a lifecycle rejection -- the same stance
     # _run_complete_run documents for ValueError, which is likewise uncaught
-    # here. EvaluationError IS caught: unlike complete-run (which evaluates
-    # a freshly constructed Result), decide evaluates stored history, so
-    # the resolve-task precedent applies.
+    # here. EvaluationError IS caught: decide evaluates stored history, so
+    # the resolve-task precedent applies (`_run_complete_run` catches it as
+    # well since SF-32 rejects skill→skill decisions at evaluation).
     except (
         DecideError,
         DecisionError,

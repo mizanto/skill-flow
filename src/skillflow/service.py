@@ -369,13 +369,16 @@ def create_run(
     event with an identical ``created_at`` and no distinct state change is noise.
     ``LifecycleEventType.RUN_STARTED`` stays unused in v0.
 
-    Known dead end: a **skill-targeted action** (SF-A-4 §9) produces a Run with
-    ``step_id is None``. When that Run completes, ``evaluator.evaluate`` cannot
-    map it -- a Run with no step has no outcome rules -- and no v0 lifecycle rule
-    can advance the Task. The action's ``skill`` is recorded in the
-    ``run.created`` payload only (the ``Run`` has no skill column). Giving a
-    skill-targeted Run a lifecycle meaning is a later issue; ``create_run`` still
-    records it, because rejecting a valid action here would contradict SF-A-4 §9.
+    A **skill-targeted action** (SF-A-4 §9) produces a Run with ``step_id is
+    None``. Its lifecycle meaning is SF-32's gap-fill, defined at the
+    commands, not here: the Run reports a decision validated against the
+    triggering step's outcome table (``complete-run``), is interpreted
+    through the step named by ``Outcome.type`` (``evaluator.evaluate``),
+    resolves its context from the triggering Run's artifacts
+    (``resolve-task``), and never resolves to another skill-targeted Run.
+    The action's ``skill`` is recorded in the ``run.created`` payload only
+    (the ``Run`` has no skill column). ``create_run`` stays permissive: it
+    materializes the action it is given and never judges lifecycle rules.
 
     Non-goals: it never chooses *whether* to run, never picks the action, never
     loads a Workflow file, never launches anything, never creates a *next* Run

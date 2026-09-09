@@ -20,6 +20,11 @@ The answer has two halves, matching SF-A-1 §9's two MVP mechanisms:
   never selected. Determinism here is order-independence: the result depends on
   the *set* of inputs, not the sequence they arrive in.
 
+A skill-targeted Run (SF-A-4 §9) has no step and therefore no
+declarations; :func:`select_trigger_context` (SF-32) is its deterministic
+half -- the triggering Run's registered artifacts, grouped by type. Which
+half applies is the caller's branch (``resolve-task``), never a guess here.
+
 Boundaries, mirroring :mod:`skillflow.outputs` and :mod:`skillflow.evaluator`:
 
 * **Task scope.** Unlike ``outputs.py``'s per-Run match, selection ranges over
@@ -50,7 +55,12 @@ from dataclasses import dataclass
 from skillflow.domain import Artifact, Task
 from skillflow.workflow import WorkflowStep
 
-__all__ = ["ContextEntry", "ContextSelection", "select_context"]
+__all__ = [
+    "ContextEntry",
+    "ContextSelection",
+    "select_context",
+    "select_trigger_context",
+]
 
 
 def _require_sequence(value: object, field_name: str) -> tuple:
@@ -199,5 +209,62 @@ def select_context(
             artifacts=_latest_per_name(artifacts, declared_type),
         )
         for declared_type in step.context
+    )
+    return ContextSelection(entries=entries)
+
+
+def select_trigger_context(
+    *, task: Task, artifacts: Iterable[Artifact]
+) -> ContextSelection:
+    """Return the triggering Run's artifacts as context, grouped by type.
+
+    The skill-Run half of Context Selection (SF-32, gap-fill for SF-A-4 §9):
+    a skill-targeted Run has no Workflow step and therefore no declared
+    context types, but SF-A-1 §14 still requires it to receive "the relevant
+    review artifact". The deterministic source is the artifacts the
+    triggering Run registered -- the caller (``resolve-task``) passes them in
+    via ``store.list_artifacts_for_run``.
+
+    The rule order below is the contract: it fixes error precedence,
+    mirroring :func:`select_context` rules 2-3.
+
+    1. ``task`` is a ``Task``, else ``ValueError``.
+    2. ``artifacts`` is an iterable and not a ``str``, else ``ValueError``;
+       every element is an ``Artifact``, else ``ValueError``.
+    3. Every artifact has ``task_id == task.id``, else ``ValueError`` naming
+       the artifact and both ids.
+    4. Group by ``type``, one :class:`ContextEntry` per type in **sorted
+       type order** (no declarations exist to order by, so sorting keeps the
+       result order-independent, mirroring ``select_context``'s
+       by-name ordering within a type). Each entry holds the latest version
+       per distinct ``name`` (the ``(version, id)`` key shared with
+       :func:`select_context` via :func:`_latest_per_name`).
+    5. No artifacts -> ``ContextSelection(entries=())``. ``unresolved`` is
+       always ``()``: every entry is non-empty by construction.
+    """
+
+    if not isinstance(task, Task):
+        raise ValueError("select_trigger_context() task must be a Task")
+
+    artifacts = _require_sequence(artifacts, "select_trigger_context() artifacts")
+    for artifact in artifacts:
+        if not isinstance(artifact, Artifact):
+            raise ValueError("select_trigger_context() artifacts must contain Artifact")
+
+    for artifact in artifacts:
+        if artifact.task_id != task.id:
+            raise ValueError(
+                f"artifact {artifact.id!r} belongs to task {artifact.task_id!r}, "
+                f"not task {task.id!r}; select_trigger_context() resolves a "
+                "triggering Run's artifacts against one Task"
+            )
+
+    declared_types = sorted({artifact.type for artifact in artifacts})
+    entries = tuple(
+        ContextEntry(
+            type=declared_type,
+            artifacts=_latest_per_name(artifacts, declared_type),
+        )
+        for declared_type in declared_types
     )
     return ContextSelection(entries=entries)

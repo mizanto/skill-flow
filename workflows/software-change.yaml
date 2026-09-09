@@ -25,8 +25,11 @@ steps:
     skill: decomposition
     model: opus
     effort: high
-    # Consumes the requirements produced by the first step (SF-A-1 §9).
-    context: [requirements]
+    # Consumes the requirements produced by the first step (SF-A-1 §9) plus
+    # the research findings when re-decomposing after SF-A-4 §9 research
+    # (SF-32): 'research' resolves only on that pass, like 'review' on
+    # implementation.
+    context: [requirements, research]
     outputs:
       - type: plan
         required: true
@@ -63,6 +66,10 @@ steps:
       # C: SF-A-4 §9 -- a skill target, deliberately not a step in this
       # workflow, and never validated against the step list.
       fundamental_assumption_wrong: { action: run, skill: research }
+      # C2: research -- or the review itself -- concludes the plan must be
+      # redone. An ordinary rule targeting an earlier step, like B; the
+      # skill-Run interpretation is SF-32's gap-fill, not a new entity.
+      replan:                       { action: run, step: decomposition }
       # D: hand the Task to /skillflow:decide (Task -> waiting_for_human).
       human_required:               { action: human }
     # D: the decisions /skillflow:decide accepts for this step. A decision

@@ -36,7 +36,7 @@ from skillflow.domain import (
     TaskStatus,
 )
 from skillflow.evaluator import EvaluationOutput
-from skillflow.run_input import RunInput, resolve_run_input
+from skillflow.run_input import RunInput, resolve_run_input, resolve_skill_run_input
 from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType, ExpectedOutput, WorkflowStep
 from skillflow.workflow_loader import load_workflow
@@ -141,7 +141,10 @@ def test_module_defines_exactly_the_v0_dataclasses():
 
 
 def test_all_matches_the_public_surface():
-    assert set(run_input_module.__all__) == V0_DATACLASSES | {"resolve_run_input"}
+    assert set(run_input_module.__all__) == V0_DATACLASSES | {
+        "resolve_run_input",
+        "resolve_skill_run_input",
+    }
 
 
 def test_entity_fields_match_spec():
@@ -662,3 +665,105 @@ def test_end_to_end_rework_run_input_over_real_storage(conn, ws):
         for field in dataclasses.fields(resolved)
         if field.name != "context"
     )
+
+
+# --- resolve_skill_run_input: the skill-Run half (SF-32) ----------------------
+
+
+def _skill_resolve(**over):
+    """``resolve_skill_run_input`` with a consistent default triple."""
+    kw = dict(
+        task=_task(),
+        run=_run(step_id=None),
+        skill="research",
+        artifacts=[],
+    )
+    kw.update(over)
+    return resolve_skill_run_input(**kw)
+
+
+def test_skill_run_full_projection():
+    review = _artifact(
+        id="rev-1",
+        run_id="run-0",
+        name="review.md",
+        type="review",
+        path="task-1/review-v1.md",
+    )
+    resolved = _skill_resolve(
+        run=_run(step_id=None, instructions="  Follow the findings.  "),
+        artifacts=[review],
+    )
+    assert resolved.task_id == "task-1"
+    assert resolved.task_title == "Change something"
+    assert resolved.task_description == ""
+    assert resolved.run_id == "run-1"
+    assert resolved.step_id is None
+    assert resolved.skill == "research"
+    assert resolved.model is None
+    assert resolved.effort is None
+    assert resolved.outputs == ()
+    # Run.instructions, verbatim -- the same projection rule as step Runs.
+    assert resolved.instructions == "  Follow the findings.  "
+    assert resolved.context.artifacts == (review,)
+    assert resolved.context.unresolved == ()
+
+
+def test_skill_run_context_groups_trigger_artifacts_by_type():
+    review = _artifact(
+        id="r", name="review.md", type="review", path="task-1/review-v1.md"
+    )
+    notes = _artifact(id="n", name="notes.md", type="notes", path="task-1/notes.md")
+    resolved = _skill_resolve(artifacts=[review, notes])
+    assert [e.type for e in resolved.context.entries] == ["notes", "review"]
+    assert resolved.context.unresolved == ()
+
+
+def test_skill_value_is_stored_stripped():
+    resolved = _skill_resolve(skill="  research  ")
+    assert resolved.skill == "research"
+
+
+def test_run_input_accepts_a_none_step_id():
+    resolved = RunInput(**_kwargs(step_id=None))
+    assert resolved.step_id is None
+
+
+def test_step_targeted_run_rejected():
+    with pytest.raises(ValueError) as exc:
+        _skill_resolve(run=_run(step_id="review"))
+    msg = str(exc.value)
+    assert "review" in msg and "resolve_run_input" in msg
+
+
+def test_skill_run_of_another_task_rejected():
+    with pytest.raises(ValueError) as exc:
+        _skill_resolve(run=_run(step_id=None, task_id="other-task"))
+    msg = str(exc.value)
+    assert "run-1" in msg and "other-task" in msg and "task-1" in msg
+
+
+@pytest.mark.parametrize("skill", [None, "", "   ", 7])
+def test_blank_or_non_string_skill_rejected(skill):
+    with pytest.raises(ValueError, match="skill must be a non-empty string"):
+        _skill_resolve(skill=skill)
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"task": "task-1"}, {"run": "run-1"}],
+    ids=["task", "run"],
+)
+def test_non_entity_inputs_rejected(kw):
+    with pytest.raises(ValueError):
+        _skill_resolve(**kw)
+
+
+def test_skill_run_artifact_validation_is_delegated():
+    with pytest.raises(ValueError, match="must be an iterable"):
+        _skill_resolve(artifacts="review.md")
+    with pytest.raises(ValueError, match="must contain Artifact"):
+        _skill_resolve(artifacts=[_artifact(), "nope"])
+    with pytest.raises(ValueError) as exc:
+        _skill_resolve(artifacts=[_artifact(task_id="other-task")])
+    assert "other-task" in str(exc.value)

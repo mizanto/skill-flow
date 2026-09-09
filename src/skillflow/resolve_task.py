@@ -19,9 +19,11 @@ the order is the contract, because it fixes error precedence:
                                                            ResultMissing /
                                                            EvaluationError
 7  validate the action BEFORE writing -> NoLifecycleAction / WorkflowMismatch
-8  read the Task's artifacts
+8  read artifacts: the Task's (a step Run) or the triggering Run's
+   (a skill-targeted Run, SF-32)
 9  service.create_run(...)  <- the single write
-10 run_input.resolve_run_input(...)   <- pure projection
+10 run_input.resolve_run_input(...) / resolve_skill_run_input(...)
+   <- pure projection, branched on the action
 ```
 
 Steps 1-3 and 5-8 are reads only. Step 4 performs the one user-requested
@@ -32,7 +34,8 @@ written. Every other rejection therefore happens **before** the single
 lifecycle write (step 9), so no path can strand a ``running`` Run.
 Lifecycle rules themselves are never decided here: initial resolution and
 outcome mapping are delegated to :mod:`skillflow.evaluator`, context to
-:func:`skillflow.run_input.resolve_run_input`, persistence to
+:func:`skillflow.run_input.resolve_run_input` (or
+``resolve_skill_run_input`` for a skill-targeted action), persistence to
 :mod:`skillflow.service` / :mod:`skillflow.store`.
 
 Boundaries: this module never launches Claude Code, never creates a second
@@ -50,11 +53,12 @@ from skillflow.evaluator import (
     evaluate,
     resolve_initial_action,
 )
-from skillflow.run_input import RunInput, resolve_run_input
+from skillflow.run_input import RunInput, resolve_run_input, resolve_skill_run_input
 from skillflow.service import assign_workflow, create_run, register_workflow
 from skillflow.store import (
     get_result_for_run,
     get_task,
+    list_artifacts_for_run,
     list_artifacts_for_task,
     list_human_decisions_for_task,
     list_runs_for_task,
@@ -244,12 +248,23 @@ def resolve_task(
             f"{action.reason!r}); no new Run follows -- {hint}",
         )
     if action.step is None:
-        raise ResolveTaskError(
-            "NoLifecycleAction",
-            f"lifecycle resolved to skill {action.skill!r} with no workflow "
-            "step; a skill-targeted Run has no v0 lifecycle meaning (SF-A-4 "
-            "§9) -- adjust the Workflow definition, then run "
-            f"`skillflow resolve-task {task.id}`",
+        # A skill-targeted Run (SF-32 gap-fill for SF-A-4 §9): no workflow
+        # step, so its context is the triggering Run's registered artifacts.
+        # `triggered_by_run_id` is always set here -- initial actions target
+        # steps[0] by construction -- but the lookup is total anyway.
+        trigger_artifacts = (
+            list_artifacts_for_run(conn, triggered_by_run_id)
+            if triggered_by_run_id is not None
+            else ()
+        )
+        run = create_run(
+            conn,
+            task_id=task.id,
+            action=action,
+            triggered_by_run_id=triggered_by_run_id,
+        )
+        return resolve_skill_run_input(
+            task=task, run=run, skill=action.skill, artifacts=trigger_artifacts
         )
     step = definition.find_step(action.step)
     if step is None:

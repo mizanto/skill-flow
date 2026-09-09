@@ -24,10 +24,15 @@ precedence (the convention every sibling module already documents):
      no runs ................. -> RunNotFound
      latest not COMPLETED .... -> RunNotCompleted
 4  resolve the Run's step (reads only)
-     run.workflow_definition_id / run.step_id None -> StepUnresolved
-     load_definition(...) ........................ -> WorkflowLoadError propagates
-     definition.find_step(run.step_id) None ..... -> WorkflowMismatch
+     run.workflow_definition_id None -> StepUnresolved
+     load_definition(...) .......... -> WorkflowLoadError propagates
+     step Run: find_step(run.step_id) None -> WorkflowMismatch
+     skill Run (SF-32): load the Result (missing -> ResultMissing, the
+       same code a step Run without one gets), require its outcome
+       (None -> StepUnresolved), then find_step(outcome.type) None ->
+       WorkflowMismatch
 5  Result = get_result_for_run(current.id) ....... missing -> ResultMissing
+   (step Runs only; already loaded for skill Runs in step 4)
 6  DECISION VALIDATION (SF-A-5 §7.5, pure)
      decisions.validate_decision(step=step, request=request)
      -> DecisionError("InvalidHumanDecision") propagates
@@ -231,35 +236,56 @@ def decide(
             "declares no decisions; a decision needs the step that produced "
             f"the human outcome -- investigate how task {task.id!r} was parked",
         )
-    if current.step_id is None:
-        raise DecideError(
-            "StepUnresolved",
-            f"run {current.id!r} targets no workflow step (a skill-targeted "
-            "Run, SF-A-4 §9), so it declares no decisions; a decision needs "
-            "the step that produced the human outcome -- investigate how "
-            f"task {task.id!r} was parked",
-        )
     definition = load_definition(
         workspace.workflows_dir, current.workflow_definition_id
     )
-    step = definition.find_step(current.step_id)
-    if step is None:
-        raise DecideError(
-            "WorkflowMismatch",
-            f"run {current.id!r} targets step {current.step_id!r}, absent "
-            f"from workflow {definition.name!r}; the definition changed "
-            "under this Task -- restore the step, then run "
-            "`/skillflow:decide <decision>`",
-        )
+    if current.step_id is None:
+        # A skill-targeted Run (SF-32 gap-fill for SF-A-4 §9): the step is
+        # resolved from the outcome that parked the Task.
+        result = get_result_for_run(conn, current.id)
+        if result is None:
+            raise DecideError(
+                "ResultMissing",
+                f"completed run {current.id!r} has no canonical Result; a "
+                "decision answers a completed Run's recorded outcome -- "
+                "investigate the Run history",
+            )
+        if result.outcome is None:
+            raise DecideError(
+                "StepUnresolved",
+                f"run {current.id!r} targets no workflow step and reported "
+                "no outcome, so no step's decisions apply; a decision needs "
+                "the step that produced the human outcome -- investigate how "
+                f"task {task.id!r} was parked",
+            )
+        step = definition.find_step(result.outcome.type)
+        if step is None:
+            raise DecideError(
+                "WorkflowMismatch",
+                f"run {current.id!r} names step {result.outcome.type!r} in "
+                f"its outcome, absent from workflow {definition.name!r}; the "
+                "definition changed under this Task -- restore the step, "
+                "then run `/skillflow:decide <decision>`",
+            )
+    else:
+        step = definition.find_step(current.step_id)
+        if step is None:
+            raise DecideError(
+                "WorkflowMismatch",
+                f"run {current.id!r} targets step {current.step_id!r}, absent "
+                f"from workflow {definition.name!r}; the definition changed "
+                "under this Task -- restore the step, then run "
+                "`/skillflow:decide <decision>`",
+            )
 
-    result = get_result_for_run(conn, current.id)
-    if result is None:
-        raise DecideError(
-            "ResultMissing",
-            f"completed run {current.id!r} has no canonical Result; a "
-            "decision answers a completed Run's recorded outcome -- "
-            "investigate the Run history",
-        )
+        result = get_result_for_run(conn, current.id)
+        if result is None:
+            raise DecideError(
+                "ResultMissing",
+                f"completed run {current.id!r} has no canonical Result; a "
+                "decision answers a completed Run's recorded outcome -- "
+                "investigate the Run history",
+            )
 
     validated = validate_decision(step=step, request=request)
 

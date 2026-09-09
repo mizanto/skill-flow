@@ -25,7 +25,7 @@ import ast
 import contextlib
 import dataclasses
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,10 +45,15 @@ from skillflow.domain import (
     Outcome,
     Result,
     ResultStatus,
+    Run,
     RunStatus,
     TaskStatus,
 )
-from skillflow.evaluator import REASON_NO_OUTCOME, EvaluationOutput
+from skillflow.evaluator import (
+    REASON_NO_OUTCOME,
+    EvaluationError,
+    EvaluationOutput,
+)
 from skillflow.resolve_task import ResolveTaskError
 from skillflow.resolve_task import resolve_task as resolve
 from skillflow.service import create_run, create_task, register_workflow
@@ -429,45 +434,255 @@ def test_decision_on_step_with_no_outcomes_rejected(conn, ws, workflows):
     assert _snapshot(conn, task.id, run_input.run_id) == before
 
 
-def test_skill_targeted_run_with_decision_rejected(conn, ws, workflows):
-    _, task = _assigned(conn)
-    run_input = resolve(conn, ws, task_id=task.id)
-    first = store.get_run(conn, run_input.run_id)
-    complete(
+def _skill_run_after_review(conn, ws, task):
+    """Drive to review, complete it as faw, and create the research Run.
+
+    Returns (review Run, skill Run). Mirrors the real flow: the skill Run is
+    created from the review completion's own evaluated action.
+    """
+    review = _drive_to_review(conn, ws, task)
+    done = complete(
         conn,
         ws,
-        run_id=first.id,
+        run_id=review.id,
         request=CompletionRequest(
-            decision="ready",
-            artifacts=(_submit("requirements.md", "requirements"),),
+            decision="fundamental_assumption_wrong",
+            artifacts=(_submit("review.md", "review"),),
         ),
     )
+    assert done.action.action is ActionType.RUN
+    assert done.action.skill == "research"
     skill_run = create_run(
+        conn,
+        task_id=task.id,
+        action=done.action,
+        triggered_by_run_id=review.id,
+    )
+    assert skill_run.step_id is None
+    return review, skill_run
+
+
+def test_skill_targeted_run_with_trigger_step_decision_evaluates(conn, ws, workflows):
+    # SF-32: the decision is validated against the triggering step's table
+    # and the completion evaluates like a step Run's.
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    runs_before = len(store.list_runs_for_task(conn, task.id))
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    done = complete(
+        conn,
+        ws,
+        run_id=skill_run.id,
+        request=CompletionRequest(
+            decision="replan",
+            artifacts=(_submit("research.md", "research"),),
+        ),
+    )
+    assert done.run.status is RunStatus.COMPLETED
+    assert done.result.outcome == Outcome(type="review", decision="replan")
+    assert done.action.action is ActionType.RUN
+    assert (done.action.step, done.action.skill) == ("decomposition", None)
+    assert done.action.reason == "replan"
+    assert done.task.status is TaskStatus.ACTIVE
+    assert store.get_task(conn, task.id).status is TaskStatus.ACTIVE
+    (research,) = store.list_artifacts_for_run(conn, skill_run.id)
+    assert (research.name, research.type, research.version) == (
+        "research.md",
+        "research",
+        1,
+    )
+    assert research.supersedes_id is None
+    # The single atomic write: artifact + Result + Run completion -- and no
+    # next Run (the evaluated `run` action only keeps the Task active).
+    assert len(store.list_runs_for_task(conn, task.id)) == runs_before
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == (
+        events_before + 3
+    )
+    assert sorted(_event_types(conn, task.id, 3)) == sorted(
+        [
+            LifecycleEventType.ARTIFACT_CREATED,
+            LifecycleEventType.RESULT_CREATED,
+            LifecycleEventType.RUN_COMPLETED,
+        ]
+    )
+
+
+def test_skill_targeted_run_with_unknown_decision_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    before = _snapshot(conn, task.id, skill_run.id)
+    with pytest.raises(CompletionError) as exc_info:
+        complete(
+            conn,
+            ws,
+            run_id=skill_run.id,
+            request=CompletionRequest(decision="bogus"),
+        )
+    assert exc_info.value.code == "InvalidOutcome"
+    assert "'bogus'" in str(exc_info.value)
+    assert "'replan'" in str(exc_info.value)  # the trigger step's keys
+    assert _snapshot(conn, task.id, skill_run.id) == before
+
+
+def test_skill_targeted_run_with_skill_targeting_decision_rejected(conn, ws, workflows):
+    # Approver decision 5: research must not resolve to research again.
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    before = _snapshot(conn, task.id, skill_run.id)
+    with pytest.raises(EvaluationError, match="must not target another skill"):
+        complete(
+            conn,
+            ws,
+            run_id=skill_run.id,
+            request=CompletionRequest(decision="fundamental_assumption_wrong"),
+        )
+    assert _snapshot(conn, task.id, skill_run.id) == before
+
+
+def test_skill_targeted_run_with_human_mapping_decision_parks_task(conn, ws, workflows):
+    # The evaluated `human` consequence applies to skill Runs too.
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    done = complete(
+        conn,
+        ws,
+        run_id=skill_run.id,
+        request=CompletionRequest(decision="human_required"),
+    )
+    assert done.run.status is RunStatus.COMPLETED
+    assert done.action.action is ActionType.HUMAN
+    assert done.task.status is TaskStatus.WAITING_FOR_HUMAN
+    assert store.get_task(conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+
+
+def test_skill_targeted_run_without_a_triggering_step_rejected(conn, ws, workflows):
+    # A skill Run triggered by another skill Run (hand-built only --
+    # uncreatable via commands since skill→skill decisions are rejected).
+    _, task = _assigned(conn)
+    _, first_skill = _skill_run_after_review(conn, ws, task)
+    complete(conn, ws, run_id=first_skill.id, request=CompletionRequest())
+    second = create_run(
         conn,
         task_id=task.id,
         action=EvaluationOutput(
             action=ActionType.RUN, reason="research", skill="research"
         ),
-        triggered_by_run_id=first.id,
+        triggered_by_run_id=first_skill.id,
     )
-    assert skill_run.step_id is None
+    assert second.step_id is None
+    before = _snapshot(conn, task.id, second.id)
+    with pytest.raises(CompleteRunError) as exc_info:
+        complete(
+            conn,
+            ws,
+            run_id=second.id,
+            request=CompletionRequest(decision="replan"),
+        )
+    assert exc_info.value.code == "StepUnresolved"
+    assert "no triggering step" in str(exc_info.value)
+    assert _snapshot(conn, task.id, second.id) == before
+
+
+def test_skill_targeted_run_without_workflow_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    with conn:
+        store.update_run(conn, replace(skill_run, workflow_definition_id=None))
     before = _snapshot(conn, task.id, skill_run.id)
     with pytest.raises(CompleteRunError) as exc_info:
         complete(
             conn,
             ws,
             run_id=skill_run.id,
-            request=CompletionRequest(decision="ready"),
+            request=CompletionRequest(decision="replan"),
         )
-    assert exc_info.value.code == "OutcomeNotExpected"
+    assert exc_info.value.code == "StepUnresolved"
+    assert "no Workflow Definition" in str(exc_info.value)
     assert _snapshot(conn, task.id, skill_run.id) == before
+
+
+def test_skill_targeted_run_without_trigger_rejected(conn, ws, workflows):
+    # Provenance is immutable history (`store.update_run` never writes it),
+    # so the triggerless Run is inserted directly, `test_decide._stored_run`
+    # style, on a fresh task with no running Run.
+    _, task = _assigned(conn)
+    now = datetime.now(UTC)
+    run = Run(
+        id="run-no-trigger",
+        task_id=task.id,
+        status=RunStatus.RUNNING,
+        created_at=now,
+        started_at=now,
+        workflow_definition_id="software-change",
+        step_id=None,
+    )
+    with conn:
+        store.insert_run(conn, run)
+    before = _snapshot(conn, task.id, run.id)
+    with pytest.raises(CompleteRunError) as exc_info:
+        complete(
+            conn,
+            ws,
+            run_id=run.id,
+            request=CompletionRequest(decision="replan"),
+        )
+    assert exc_info.value.code == "StepUnresolved"
+    assert "no triggering step" in str(exc_info.value)
+    assert _snapshot(conn, task.id, run.id) == before
+
+
+def test_skill_targeted_run_trigger_step_absent_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    review, skill_run = _skill_run_after_review(conn, ws, task)
+    review = store.get_run(conn, review.id)  # completed, not the stale object
+    with conn:
+        store.update_run(conn, replace(review, step_id="ghost"))
+    before = _snapshot(conn, task.id, skill_run.id)
+    with pytest.raises(CompleteRunError) as exc_info:
+        complete(
+            conn,
+            ws,
+            run_id=skill_run.id,
+            request=CompletionRequest(decision="replan"),
+        )
+    assert exc_info.value.code == "WorkflowMismatch"
+    assert "'ghost'" in str(exc_info.value)
+    assert _snapshot(conn, task.id, skill_run.id) == before
+
+
+def test_skill_targeted_evaluation_failure_leaves_run_running(
+    conn, ws, workflows, monkeypatch
+):
+    def boom(_evaluation):
+        raise EvaluationError("boom")
+
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
+    before = _snapshot(conn, task.id, skill_run.id)
+    monkeypatch.setattr(complete_run_pkg, "evaluate", boom)
+    with pytest.raises(EvaluationError, match="boom"):
+        complete(
+            conn,
+            ws,
+            run_id=skill_run.id,
+            request=CompletionRequest(
+                decision="replan",
+                artifacts=(_submit("research.md", "research"),),
+            ),
+        )
+    assert _snapshot(conn, task.id, skill_run.id) == before
+
+
+def test_skill_targeted_run_without_decision_keeps_action_none(conn, ws, workflows):
+    _, task = _assigned(conn)
+    _, skill_run = _skill_run_after_review(conn, ws, task)
     task_before = store.get_task(conn, task.id)
     events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
     done = complete(conn, ws, run_id=skill_run.id, request=CompletionRequest())
     assert done.run.status is RunStatus.COMPLETED
     assert done.result.outcome is None
-    # A skill-targeted Run keeps its SF-23 semantics: no evaluation, no Task
-    # change -- only the Result and the Run completion land.
+    # A decisionless skill-targeted Run keeps its SF-23 semantics: no
+    # evaluation, no Task change -- only the Result and Run completion land.
     assert done.action is None
     assert done.task == task_before
     assert store.get_task(conn, task.id) == task_before

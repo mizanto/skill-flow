@@ -192,6 +192,7 @@ def test_every_reference_review_key_validates():
         "changes_requested",
         "fundamental_assumption_wrong",
         "human_required",
+        "replan",
     }
     for key in step.outcomes:
         outcome = validate_outcome(step=step, request=CompletionRequest(decision=key))

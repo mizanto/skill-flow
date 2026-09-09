@@ -43,15 +43,18 @@ from skillflow.domain import (
     TRIGGER_REASON_INITIAL,
     HumanDecision,
     LifecycleEventType,
+    Outcome,
+    Result,
+    ResultStatus,
     Run,
     RunStatus,
     Task,
     TaskStatus,
 )
-from skillflow.evaluator import EvaluationOutput
+from skillflow.evaluator import EvaluationError, EvaluationOutput
 from skillflow.resolve_task import ResolveTaskError
 from skillflow.resolve_task import resolve_task as resolve
-from skillflow.service import create_task, register_workflow
+from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType
 from skillflow.workflow_loader import load_workflow
 
@@ -135,6 +138,40 @@ def _parked(conn, ws, task):
     return store.get_run(conn, run.id)
 
 
+def _parked_by_skill(conn, ws, task):
+    """Park ``task`` with a real ``human_required`` research outcome.
+
+    Review completes as fundamental_assumption_wrong, the research Run
+    completes as human_required. Return the completed skill Run.
+    """
+    review = _drive_to_review(conn, ws, task)
+    done = complete(
+        conn,
+        ws,
+        run_id=review.id,
+        request=CompletionRequest(
+            decision="fundamental_assumption_wrong",
+            artifacts=(_submit("review.md", "review"),),
+        ),
+    )
+    assert done.action.skill == "research"
+    skill_run = create_run(
+        conn,
+        task_id=task.id,
+        action=done.action,
+        triggered_by_run_id=review.id,
+    )
+    complete(
+        conn,
+        ws,
+        run_id=skill_run.id,
+        request=CompletionRequest(decision="human_required"),
+    )
+    parked = store.get_task(conn, task.id)
+    assert parked.status is TaskStatus.WAITING_FOR_HUMAN
+    return store.get_run(conn, skill_run.id)
+
+
 def _waiting_task(conn, *, title="Ship it"):
     """Create a Task and park it directly (no Runs).
 
@@ -167,6 +204,19 @@ def _stored_run(conn, task_id, run_id, **over):
     with conn:
         store.insert_run(conn, run)
     return store.get_run(conn, run.id)
+
+
+def _stored_result(conn, run_id, outcome=None):
+    result = Result(
+        id=f"result-{run_id}",
+        run_id=run_id,
+        status=ResultStatus.COMPLETED,
+        created_at=datetime.now(UTC),
+        outcome=outcome,
+    )
+    with conn:
+        store.insert_result(conn, result)
+    return result
 
 
 def _snapshot(conn, task_id):
@@ -443,7 +493,9 @@ def test_run_without_workflow_rejected(conn, ws, workflows):
     assert _snapshot(conn, task.id) == before
 
 
-def test_skill_targeted_run_rejected(conn, ws, workflows):
+def test_skill_targeted_run_without_result_rejected(conn, ws, workflows):
+    # SF-32 flips the code: a stepless Run's step now resolves from its
+    # Result, so a missing Result is ResultMissing -- uniform with step Runs.
     task = _waiting_task(conn)
     _stored_run(conn, task.id, "run-1", step_id=None)
     before = _snapshot(conn, task.id)
@@ -451,7 +503,117 @@ def test_skill_targeted_run_rejected(conn, ws, workflows):
         decide_cmd(
             conn, ws, task_id=task.id, request=DecisionRequest(decision="approve")
         )
+    assert exc_info.value.code == "ResultMissing"
+    assert _snapshot(conn, task.id) == before
+
+
+def test_skill_targeted_run_without_outcome_rejected(conn, ws, workflows):
+    task = _waiting_task(conn)
+    _stored_run(conn, task.id, "run-1", step_id=None)
+    _stored_result(conn, "run-1", outcome=None)
+    before = _snapshot(conn, task.id)
+    with pytest.raises(DecideError) as exc_info:
+        decide_cmd(
+            conn, ws, task_id=task.id, request=DecisionRequest(decision="approve")
+        )
     assert exc_info.value.code == "StepUnresolved"
+    assert "no outcome" in str(exc_info.value)
+    assert _snapshot(conn, task.id) == before
+
+
+def test_skill_targeted_run_outcome_naming_absent_step_rejected(conn, ws, workflows):
+    task = _waiting_task(conn)
+    _stored_run(conn, task.id, "run-1", step_id=None)
+    _stored_result(conn, "run-1", outcome=Outcome(type="ghost", decision="approve"))
+    before = _snapshot(conn, task.id)
+    with pytest.raises(DecideError) as exc_info:
+        decide_cmd(
+            conn, ws, task_id=task.id, request=DecisionRequest(decision="approve")
+        )
+    assert exc_info.value.code == "WorkflowMismatch"
+    assert "'ghost'" in str(exc_info.value)
+    assert _snapshot(conn, task.id) == before
+
+
+def test_decision_on_skill_run_approve_completes_task(conn, ws, workflows):
+    # SF-32: the decision validates against the routed review step's table.
+    _, task = _assigned(conn)
+    skill_run = _parked_by_skill(conn, ws, task)
+    record = decide_cmd(
+        conn, ws, task_id=task.id, request=DecisionRequest(decision="approve")
+    )
+    assert record.action.action is ActionType.COMPLETE
+    assert record.task.status is TaskStatus.COMPLETED
+    assert store.get_task(conn, task.id).status is TaskStatus.COMPLETED
+    assert record.decision.run_id == skill_run.id
+    assert record.decision.decision == "approve"
+
+
+def test_decision_on_skill_run_request_changes_reactivates(conn, ws, workflows):
+    _, task = _assigned(conn)
+    _parked_by_skill(conn, ws, task)
+    record = decide_cmd(
+        conn, ws, task_id=task.id, request=DecisionRequest(decision="request_changes")
+    )
+    assert record.action.action is ActionType.RUN
+    assert (record.action.step, record.action.skill) == ("implementation", None)
+    assert store.get_task(conn, task.id).status is TaskStatus.ACTIVE
+    run_input = resolve(conn, ws, task_id=task.id)
+    assert run_input.step_id == "implementation"
+
+
+def test_invalid_decision_on_skill_run_rejected(conn, ws, workflows):
+    _, task = _assigned(conn)
+    _parked_by_skill(conn, ws, task)
+    before = _snapshot(conn, task.id)
+    with pytest.raises(DecisionError) as exc_info:
+        decide_cmd(conn, ws, task_id=task.id, request=DecisionRequest(decision="bogus"))
+    assert exc_info.value.code == "InvalidHumanDecision"
+    assert _snapshot(conn, task.id) == before
+
+
+def test_skill_targeting_decision_on_skill_run_rejected(conn, ws, workflows):
+    # Approver decision 5: no command path may resolve skill→skill.
+    (workflows / "custom.yaml").write_text(
+        "name: custom\n"
+        "\n"
+        "steps:\n"
+        "  - id: probe\n"
+        "    skill: probe\n"
+        "    outcomes:\n"
+        "      stuck: { action: human }\n"
+        "      divert: { action: run, skill: research }\n"
+        "    decisions:\n"
+        "      again: { action: run, skill: research }\n",
+        encoding="utf-8",
+    )
+    register_workflow(conn, load_workflow(workflows / "custom.yaml"))
+    task = create_task(conn, title="Custom", workflow_definition_id="custom")
+    probe_input = resolve(conn, ws, task_id=task.id)
+    assert probe_input.step_id == "probe"
+    done = complete(
+        conn,
+        ws,
+        run_id=probe_input.run_id,
+        request=CompletionRequest(decision="divert"),
+    )
+    assert done.action.skill == "research"
+    skill_run = create_run(
+        conn,
+        task_id=task.id,
+        action=done.action,
+        triggered_by_run_id=probe_input.run_id,
+    )
+    complete(
+        conn,
+        ws,
+        run_id=skill_run.id,
+        request=CompletionRequest(decision="stuck"),
+    )
+    assert store.get_task(conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    before = _snapshot(conn, task.id)
+    with pytest.raises(EvaluationError, match="must not target another skill"):
+        decide_cmd(conn, ws, task_id=task.id, request=DecisionRequest(decision="again"))
     assert _snapshot(conn, task.id) == before
 
 

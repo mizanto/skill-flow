@@ -14,6 +14,11 @@ persists the ``running`` Run, :func:`skillflow.context.select_context` resolves
 the step's declared artifacts, and this module assembles the three into the one
 value object handed to the session.
 
+A skill-targeted Run (SF-A-4 §9) takes the second half:
+:func:`resolve_skill_run_input` (SF-32, gap-fill) projects the action's skill
+with no step-derived parameters and the triggering Run's artifacts as context.
+Which half applies is ``resolve-task``'s branch on the resolving action.
+
 Two boundaries:
 
 * **Projection only -- no history.** ``RunInput`` holds neither the ``Run`` nor
@@ -61,11 +66,15 @@ detail of the command that renders it (SF-A-5 §4.8) and belongs to SF-21.
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from skillflow.context import ContextSelection, select_context
+from skillflow.context import (
+    ContextSelection,
+    select_context,
+    select_trigger_context,
+)
 from skillflow.domain import Artifact, Run, Task
 from skillflow.workflow import ExpectedOutput, WorkflowStep
 
-__all__ = ["RunInput", "resolve_run_input"]
+__all__ = ["RunInput", "resolve_run_input", "resolve_skill_run_input"]
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -117,6 +126,11 @@ class RunInput:
     ``context.artifacts`` -> ``context`` (a ``ContextSelection``); ``outputs`` ->
     ``outputs`` (the step's ``ExpectedOutput`` declarations).
 
+    ``step_id`` is ``None`` for a skill-targeted Run (SF-32, gap-fill for
+    SF-A-4 §9): such a Run has no workflow step, so ``skill`` comes from the
+    resolving action and ``model`` / ``effort`` / ``outputs`` carry nothing.
+    A non-``None`` ``step_id`` is still required to be non-blank.
+
     No derived properties: ``run_input.context.artifacts`` and
     ``run_input.context.unresolved`` already read well, and aliases would be the
     speculative surface AGENTS.md principles 1 and 6 rule out.
@@ -126,7 +140,7 @@ class RunInput:
     task_title: str
     task_description: str
     run_id: str
-    step_id: str
+    step_id: str | None = None
     skill: str
     model: str | None = None
     effort: str | None = None
@@ -137,9 +151,13 @@ class RunInput:
     outputs: tuple[ExpectedOutput, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("task_id", "task_title", "run_id", "step_id", "skill"):
+        for name in ("task_id", "task_title", "run_id", "skill"):
             cleaned = _require_text(getattr(self, name), f"RunInput.{name}")
             object.__setattr__(self, name, cleaned)
+        if self.step_id is not None:
+            object.__setattr__(
+                self, "step_id", _require_text(self.step_id, "RunInput.step_id")
+            )
         for name in ("model", "effort"):
             value = getattr(self, name)
             if value is not None:
@@ -224,4 +242,70 @@ def resolve_run_input(
         instructions=run.instructions,
         context=select_context(step=step, task=task, artifacts=artifacts),
         outputs=step.outputs,
+    )
+
+
+def resolve_skill_run_input(
+    *, task: Task, run: Run, skill: str, artifacts: Iterable[Artifact]
+) -> RunInput:
+    """Return the :class:`RunInput` for ``run``, a skill-targeted Run.
+
+    The skill-Run half of ``RunInput`` resolution (SF-32, gap-fill for
+    SF-A-4 §9): ``run`` was created from a skill-targeted action and has no
+    workflow step, so there are no step-derived execution parameters.
+    ``skill`` comes from the resolving action itself, ``model`` / ``effort``
+    are ``None``, ``outputs`` is ``()``, and context is the triggering Run's
+    artifacts via :func:`skillflow.context.select_trigger_context`.
+
+    The rule order below is the contract: it fixes error precedence
+    (mirroring :func:`resolve_run_input`).
+
+    1. ``task`` is a ``Task``, ``run`` is a ``Run`` and ``skill`` is a
+       non-blank string, else ``ValueError``.
+    2. ``run.task_id == task.id``, else ``ValueError`` naming both ids.
+    3. ``run.step_id is not None`` -> ``ValueError``. A step-targeted Run is
+       projected by :func:`resolve_run_input`, not here.
+    4. Delegate context wholly to
+       :func:`skillflow.context.select_trigger_context`. Its own rules apply
+       unchanged and their ``ValueError``s propagate -- ``artifacts`` is
+       deliberately **not** re-validated here, and no new selection rule is
+       introduced.
+    5. Build the ``RunInput`` with ``step_id=None``, ``skill=skill``,
+       ``model=None``, ``effort=None``, ``outputs=()`` and
+       ``instructions=run.instructions``.
+
+    Which half applies -- this function or :func:`resolve_run_input` -- is
+    the caller's (``resolve-task``'s) branch on the resolving action, never
+    inferred from the Run here beyond rule 3's guard.
+    """
+    if not isinstance(task, Task):
+        raise ValueError("resolve_skill_run_input() task must be a Task")
+    if not isinstance(run, Run):
+        raise ValueError("resolve_skill_run_input() run must be a Run")
+    if not isinstance(skill, str) or not skill.strip():
+        raise ValueError("resolve_skill_run_input() skill must be a non-empty string")
+
+    if run.task_id != task.id:
+        raise ValueError(
+            f"run {run.id!r} belongs to task {run.task_id!r}, not task {task.id!r}; "
+            "resolve_skill_run_input() projects one Task's Run"
+        )
+    if run.step_id is not None:
+        raise ValueError(
+            f"run {run.id!r} targets step {run.step_id!r}; a step-targeted Run "
+            "is projected by resolve_run_input(), not resolve_skill_run_input()"
+        )
+
+    return RunInput(
+        task_id=task.id,
+        task_title=task.title,
+        task_description=task.description,
+        run_id=run.id,
+        step_id=None,
+        skill=skill,
+        model=None,
+        effort=None,
+        instructions=run.instructions,
+        context=select_trigger_context(task=task, artifacts=artifacts),
+        outputs=(),
     )

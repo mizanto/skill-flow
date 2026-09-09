@@ -247,8 +247,10 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
 
     1. A non-``completed`` Result has no v0 lifecycle rule -- failure handling is
        SF-35. ``EvaluationError``.
-    2. A skill-targeted Run (SF-A-4 §9) has no step and therefore no outcome
-       rules. ``EvaluationError``.
+    2. A skill-targeted Run (SF-A-4 §9) has no step of its own: its outcome
+       names the interpreting step -- ``Outcome.type``, persisted from the
+       triggering step by ``complete-run`` (SF-32 gap-fill). No outcome, or a
+       type naming no step, has no v0 rule. ``EvaluationError``.
     3. The step named by the Run is absent from the Workflow (the definition file
        changed under a live Task). ``EvaluationError``.
     4. Pick the rule table: ``human_decision`` -> ``step.decisions`` keyed by the
@@ -256,10 +258,14 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
        A ``None`` outcome on a step that declares no outcome rules is terminal
        -- ``complete`` with reason ``REASON_NO_OUTCOME`` (SF-22); a ``None``
        outcome on a step that declares outcome rules has no v0 rule --
-       ``EvaluationError``.
+       ``EvaluationError``. (A skill Run never reaches the ``None`` branches --
+       rule 2 rejects it first.)
     5. No rule for that key -- reject rather than invent a transition (SF-A-4
        §11). ``EvaluationError`` listing the accepted keys.
-    6. Return the rule's action verbatim.
+    6. A skill-targeted Run resolving to another skill-targeted Run (SF-32,
+       approver decision 5): a skill Run resolves to a step, ``human``,
+       ``complete``, or ``cancel``. ``EvaluationError``.
+    7. Return the rule's action verbatim.
     """
     run = evaluation.current_run
     result = evaluation.result
@@ -272,18 +278,25 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
         )
 
     if run.step_id is None:
-        raise EvaluationError(
-            f"run {run.id!r} has no workflow step, so it has no outcome rules; "
-            "a skill-targeted Run's lifecycle meaning is not defined in v0 "
-            "(SF-A-4 §9)"
-        )
-
-    step = evaluation.workflow.find_step(run.step_id)
-    if step is None:
-        raise EvaluationError(
-            f"run {run.id!r} names step {run.step_id!r}, absent from workflow "
-            f"{evaluation.workflow.name!r}"
-        )
+        if result.outcome is None:
+            raise EvaluationError(
+                f"run {run.id!r} has no workflow step and reported no outcome, "
+                "so no outcome table can interpret it; a skill-targeted Run "
+                "advances the lifecycle only with an outcome (SF-32)"
+            )
+        step = evaluation.workflow.find_step(result.outcome.type)
+        if step is None:
+            raise EvaluationError(
+                f"run {run.id!r} names step {result.outcome.type!r} in its "
+                f"outcome, absent from workflow {evaluation.workflow.name!r}"
+            )
+    else:
+        step = evaluation.workflow.find_step(run.step_id)
+        if step is None:
+            raise EvaluationError(
+                f"run {run.id!r} names step {run.step_id!r}, absent from workflow "
+                f"{evaluation.workflow.name!r}"
+            )
 
     if evaluation.human_decision is not None:
         key = evaluation.human_decision.decision
@@ -316,6 +329,13 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
         accepted = ", ".join(repr(k) for k in sorted(table))
         raise EvaluationError(
             f"step {step.id!r} has no rule for {kind} {key!r}; accepted: [{accepted}]"
+        )
+
+    if run.step_id is None and rule.action is ActionType.RUN and rule.skill is not None:
+        raise EvaluationError(
+            f"run {run.id!r} is skill-targeted, so {kind} {key!r} must not "
+            f"target another skill (skill {rule.skill!r}); a skill-targeted "
+            "Run resolves to a step, human, complete, or cancel"
         )
 
     return EvaluationOutput(

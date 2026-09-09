@@ -409,14 +409,158 @@ def test_failed_result_rejected_naming_sf35(workflow):
         )
 
 
-def test_skill_targeted_run_with_no_step_rejected(workflow):
-    with pytest.raises(EvaluationError, match="no workflow step"):
+def test_skill_targeted_run_without_an_outcome_rejected(workflow):
+    # Narrowed from the blanket SF-11 rejection: a skill Run advances the
+    # lifecycle only with an outcome naming its interpreting step (SF-32).
+    with pytest.raises(EvaluationError, match="reported no outcome"):
+        evaluate(
+            EvaluationInput(
+                task=_task(),
+                workflow=workflow,
+                current_run=_run(step_id=None),
+                result=_result(outcome=None),
+            )
+        )
+
+
+def test_skill_targeted_run_naming_an_absent_step_rejected(workflow):
+    with pytest.raises(EvaluationError, match="absent from workflow"):
         evaluate(
             EvaluationInput(
                 task=_task(),
                 workflow=workflow,
                 current_run=_run(step_id=None),
                 result=_result(outcome=Outcome(type="x", decision="ready")),
+            )
+        )
+
+
+def test_skill_targeted_run_routes_through_its_outcome_type(workflow):
+    # SF-32: research reports `replan`; the outcome names the review step,
+    # whose table routes to decomposition.
+    out = evaluate(
+        _input(
+            workflow,
+            step_id=None,
+            outcome=Outcome(type="review", decision="replan"),
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("decomposition", None)
+    assert out.reason == "replan"
+
+
+def test_step_review_run_reporting_replan_routes_to_decomposition(workflow):
+    # Review NIT-1: the documented direct shortcut -- a step review Run may
+    # report `replan` itself without a research detour.
+    out = evaluate(
+        _input(
+            workflow,
+            step_id="review",
+            outcome=Outcome(type="review", decision="replan"),
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("decomposition", None)
+    assert out.reason == "replan"
+
+
+def test_skill_targeted_run_reporting_approved_completes(workflow):
+    # Review NIT-1: a skill Run reporting a terminal decision completes; the
+    # routed review table's `complete` carries through step_id=None.
+    out = evaluate(
+        _input(
+            workflow,
+            step_id=None,
+            outcome=Outcome(type="review", decision="approved"),
+        )
+    )
+    assert out.action is ActionType.COMPLETE
+    assert (out.step, out.skill) == (None, None)
+    assert out.reason == "approved"
+
+
+def test_skill_targeted_run_with_unknown_decision_lists_routed_keys(workflow):
+    with pytest.raises(EvaluationError) as exc:
+        evaluate(
+            _input(
+                workflow,
+                step_id=None,
+                outcome=Outcome(type="review", decision="bogus"),
+            )
+        )
+    msg = str(exc.value)
+    assert "'bogus'" in msg
+    assert "'replan'" in msg  # the routed review table's keys, not invented
+    # Unknown-key (rule 5) precedes the skill-target check (rule 6).
+    assert "must not target another skill" not in msg
+
+
+def test_human_decision_on_a_skill_run_routes_through_its_outcome_type(workflow):
+    out = evaluate(
+        _input(
+            workflow,
+            step_id=None,
+            outcome=Outcome(type="review", decision="human_required"),
+            decision="request_changes",
+        )
+    )
+    assert out.action is ActionType.RUN
+    assert (out.step, out.skill) == ("implementation", None)
+    assert out.reason == "request_changes"
+
+
+def test_skill_targeted_run_with_skill_targeting_outcome_rejected(workflow):
+    # Approver decision 5: research must not resolve to research again.
+    with pytest.raises(EvaluationError, match="must not target another skill"):
+        evaluate(
+            _input(
+                workflow,
+                step_id=None,
+                outcome=Outcome(type="review", decision="fundamental_assumption_wrong"),
+            )
+        )
+
+
+def test_skill_targeted_run_with_skill_targeting_decision_rejected():
+    workflow = Workflow(
+        name="w",
+        steps=(
+            WorkflowStep(
+                id="only",
+                skill="sk",
+                outcomes={"done": OutcomeRule(action=ActionType.COMPLETE)},
+                decisions={
+                    "research_more": OutcomeRule(
+                        action=ActionType.RUN, skill="research"
+                    )
+                },
+            ),
+        ),
+    )
+    with pytest.raises(EvaluationError, match="must not target another skill"):
+        evaluate(
+            EvaluationInput(
+                task=_task(),
+                workflow=workflow,
+                current_run=_run(step_id=None),
+                result=_result(outcome=Outcome(type="only", decision="done")),
+                human_decision=_decision("research_more"),
+            )
+        )
+
+
+def test_failed_result_precedence_over_skill_routing(workflow):
+    # Rule 1 still fires first for a skill Run.
+    with pytest.raises(EvaluationError, match="SF-35"):
+        evaluate(
+            _input(
+                workflow,
+                step_id=None,
+                result=_result(
+                    outcome=Outcome(type="review", decision="replan"),
+                    status=ResultStatus.FAILED,
+                ),
             )
         )
 

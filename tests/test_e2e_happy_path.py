@@ -60,7 +60,9 @@ STEPS = (
         "ready",
         (("plan.md", "plan", "# plan\n"),),
         ("requirements",),
-        (),
+        # `research` resolves only on a post-research re-decomposition
+        # (SF-32); on the first pass it is simply unresolved.
+        ("research",),
         (("plan", True),),
         ("plan",),
         (ActionType.RUN, "implementation", "ready"),

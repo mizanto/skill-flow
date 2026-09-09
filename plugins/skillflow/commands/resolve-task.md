@@ -32,9 +32,10 @@ Never invent a Task id, step, skill, or Workflow.
    ```
 
    substituting the Task id for `<task-id>`.
-2. On success the runtime prints the RunInput: Task, Run id, Workflow step,
-   skill, execution parameters, selected durable context, and expected
-   outputs. Treat it as the assignment for this session.
+2. On success the runtime prints the RunInput: Task, Run id, Workflow step
+   (absent for a skill-targeted Run), skill, execution parameters, selected
+   durable context, and expected outputs. Treat it as the assignment for
+   this session.
 3. Do the bounded work for the resolved step with ordinary Claude Code tools
    (Read, Write, Edit, Bash, MCP). Nothing else: do not start, continue, or
    resume any other Run in this session.

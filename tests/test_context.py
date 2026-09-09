@@ -21,7 +21,12 @@ from pathlib import Path
 import pytest
 
 from skillflow import context, store, workspace
-from skillflow.context import ContextEntry, ContextSelection, select_context
+from skillflow.context import (
+    ContextEntry,
+    ContextSelection,
+    select_context,
+    select_trigger_context,
+)
 from skillflow.domain import (
     TRIGGER_REASON_INITIAL,
     Artifact,
@@ -92,7 +97,10 @@ def test_module_defines_exactly_the_v0_dataclasses():
 
 
 def test_all_matches_the_public_surface():
-    assert set(context.__all__) == V0_DATACLASSES | {"select_context"}
+    assert set(context.__all__) == V0_DATACLASSES | {
+        "select_context",
+        "select_trigger_context",
+    }
 
 
 V0_FIELDS = {
@@ -485,3 +493,99 @@ def test_end_to_end_rework_run_receives_prior_review_and_latest_plan(conn, ws):
     assert [(a.name, a.version) for a in by_type["plan"]] == [("plan.md", 2)]
     assert [(a.name, a.version) for a in by_type["review"]] == [("review.md", 1)]
     assert result.unresolved == ()
+
+
+# --- select_trigger_context: the skill-Run half (SF-32) -----------------------
+
+
+def test_trigger_context_groups_by_sorted_type():
+    review = _artifact(
+        id="r", name="review.md", type="review", path="task-1/review-v1.md"
+    )
+    req = _artifact(id="q", name="requirements.md", type="requirements")
+    result = select_trigger_context(task=_task(), artifacts=[review, req])
+    assert [e.type for e in result.entries] == ["requirements", "review"]
+    assert result.artifacts == (req, review)
+    assert result.unresolved == ()
+
+
+def test_trigger_context_resolves_latest_version_per_name():
+    v1 = _artifact(
+        id="v1",
+        name="review.md",
+        type="review",
+        version=1,
+        path="task-1/review-v1.md",
+    )
+    v2 = _artifact(
+        id="v2",
+        name="review.md",
+        type="review",
+        version=2,
+        path="task-1/review-v2.md",
+    )
+    result = select_trigger_context(task=_task(), artifacts=[v1, v2])
+    (entry,) = result.entries
+    assert entry.type == "review"
+    assert entry.artifacts == (v2,)
+
+
+def test_trigger_context_version_tiebreak_prefers_higher_id():
+    left = _artifact(id="a-left", name="a.md", type="plan", path="task-1/a-left.md")
+    right = _artifact(id="a-right", name="a.md", type="plan", path="task-1/a-right.md")
+    forward = select_trigger_context(task=_task(), artifacts=[left, right])
+    backward = select_trigger_context(task=_task(), artifacts=[right, left])
+    assert forward == backward
+    assert forward.entries[0].artifacts == (right,)
+
+
+def test_trigger_context_is_order_independent():
+    arts = [
+        _artifact(id="a1", name="a.md", type="plan", path="task-1/a-v1.md"),
+        _artifact(id="r1", name="review.md", type="review", path="task-1/review-v1.md"),
+        _artifact(id="b1", name="b.md", type="plan", version=2, path="task-1/b-v2.md"),
+    ]
+    forward = select_trigger_context(task=_task(), artifacts=arts)
+    backward = select_trigger_context(task=_task(), artifacts=list(reversed(arts)))
+    assert forward == backward
+    assert [e.type for e in forward.entries] == ["plan", "review"]
+
+
+def test_trigger_context_with_no_artifacts_is_empty():
+    result = select_trigger_context(task=_task(), artifacts=[])
+    assert result.entries == ()
+    assert result.artifacts == ()
+    assert result.unresolved == ()
+
+
+def test_trigger_context_accepts_a_one_shot_iterable():
+    arts = [_artifact()]
+    result = select_trigger_context(task=_task(), artifacts=(a for a in arts))
+    (entry,) = result.entries
+    assert entry.artifacts == (_artifact(),)
+    assert arts == [_artifact()]
+
+
+def test_trigger_context_rejects_a_non_task():
+    with pytest.raises(ValueError, match="must be a Task"):
+        select_trigger_context(task="task-1", artifacts=[])
+
+
+@pytest.mark.parametrize("artifacts", ["requirements.md", None])
+def test_trigger_context_rejects_a_non_iterable(artifacts):
+    with pytest.raises(ValueError, match="must be an iterable"):
+        select_trigger_context(task=_task(), artifacts=artifacts)
+
+
+def test_trigger_context_rejects_a_non_artifact_element():
+    with pytest.raises(ValueError, match="must contain Artifact"):
+        select_trigger_context(task=_task(), artifacts=[_artifact(), "nope"])
+
+
+def test_trigger_context_rejects_a_foreign_task_artifact():
+    with pytest.raises(ValueError) as exc:
+        select_trigger_context(
+            task=_task(), artifacts=[_artifact(task_id="other-task")]
+        )
+    msg = str(exc.value)
+    assert "artifact-1" in msg and "other-task" in msg and "task-1" in msg

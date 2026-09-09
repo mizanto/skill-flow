@@ -553,17 +553,79 @@ def test_human_action_points_at_decide(conn, ws, workflows):
     assert len(store.list_runs_for_task(conn, task.id)) == 4
 
 
-def test_skill_targeted_action_is_rejected_without_a_write(conn, ws, workflows):
-    # review/fundamental_assumption_wrong targets a skill, not a step: v0
-    # gives it no lifecycle meaning, and creating the Run would strand it.
+def test_skill_targeted_action_creates_a_skill_run(conn, ws, workflows):
+    # SF-32: review/fundamental_assumption_wrong targets a skill, and the
+    # research Run is now created with the review's artifacts as context.
+    _, task = _assigned(conn)
+    review = _drive_to_review(conn, ws, task)
+    _artifact(conn, ws, review, name="review.md", type="review")
+    _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+
+    run_input = resolve(conn, ws, task_id=task.id)
+
+    assert run_input.step_id is None
+    assert run_input.skill == "research"
+    assert run_input.model is None
+    assert run_input.effort is None
+    assert run_input.outputs == ()
+    assert [a.name for a in run_input.context.artifacts] == ["review.md"]
+    assert run_input.context.unresolved == ()
+    run = store.get_run(conn, run_input.run_id)
+    assert run.step_id is None
+    assert run.status is RunStatus.RUNNING
+    assert run.triggered_by_run_id == review.id
+    assert run.trigger_reason == "fundamental_assumption_wrong"
+    assert len(store.list_runs_for_task(conn, task.id)) == 5
+
+
+def test_resolve_after_skill_run_with_outcome_routes_to_step(conn, ws, workflows):
     _, task = _assigned(conn)
     review = _drive_to_review(conn, ws, task)
     _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+    skill_input = resolve(conn, ws, task_id=task.id)
+    assert skill_input.step_id is None
+    skill_run = store.get_run(conn, skill_input.run_id)
+    _result(conn, _complete(conn, skill_run), decision="replan", type="review")
 
-    with pytest.raises(ResolveTaskError) as exc_info:
+    run_input = resolve(conn, ws, task_id=task.id)
+
+    assert run_input.step_id == "decomposition"
+    run = store.get_run(conn, run_input.run_id)
+    assert run.triggered_by_run_id == skill_run.id
+    assert run.trigger_reason == "replan"
+
+
+def test_resolve_after_decisionless_skill_run_rejected_without_a_write(
+    conn, ws, workflows
+):
+    _, task = _assigned(conn)
+    review = _drive_to_review(conn, ws, task)
+    _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+    skill_input = resolve(conn, ws, task_id=task.id)
+    skill_run = store.get_run(conn, skill_input.run_id)
+    _result(conn, _complete(conn, skill_run), decision=None)
+    with pytest.raises(EvaluationError):
         resolve(conn, ws, task_id=task.id)
-    assert exc_info.value.code == "NoLifecycleAction"
-    assert len(store.list_runs_for_task(conn, task.id)) == 4
+    assert len(store.list_runs_for_task(conn, task.id)) == 5
+
+
+def test_resolve_after_skill_targeting_skill_outcome_rejected(conn, ws, workflows):
+    # Hand-seeded only: complete-run rejects skill-targeting decisions, so
+    # resolve-task agrees by re-deriving the same EvaluationError.
+    _, task = _assigned(conn)
+    review = _drive_to_review(conn, ws, task)
+    _result(conn, review, decision="fundamental_assumption_wrong", type="review")
+    skill_input = resolve(conn, ws, task_id=task.id)
+    skill_run = store.get_run(conn, skill_input.run_id)
+    _result(
+        conn,
+        _complete(conn, skill_run),
+        decision="fundamental_assumption_wrong",
+        type="review",
+    )
+    with pytest.raises(EvaluationError, match="must not target another skill"):
+        resolve(conn, ws, task_id=task.id)
+    assert len(store.list_runs_for_task(conn, task.id)) == 5
 
 
 @pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.CANCELLED])

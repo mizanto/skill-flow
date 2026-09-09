@@ -21,17 +21,26 @@ error precedence (the convention every sibling module already documents):
      uncovered  = missing_required whose type no submission supplies
      uncovered  -> RequiredArtifactsMissing
      (step is None -> nothing declared -> nothing missing)
-5  OUTCOME VALIDATION (SF-A-5 §6.6, pure)
-     step is None -> request.decision must be None, else OutcomeNotExpected
-     else         -> completion.validate_outcome(step=step, request=request)
-                     -> Outcome | None; CompletionError propagates
+5  OUTCOME VALIDATION (SF-A-5 §6.6, pure + reads)
+     step set -> completion.validate_outcome(step=step, request=request)
+                 -> Outcome | None; CompletionError propagates
+     step None, no decision -> outcome = None (a decisionless
+                 skill-targeted Run reports no lifecycle outcome)
+     step None + decision   -> resolve the triggering step through
+                 triggered_by_run_id provenance (SF-32 gap-fill):
+                 no workflow / trigger / triggering step -> StepUnresolved,
+                 triggering step absent from the definition ->
+                 WorkflowMismatch; then completion.validate_outcome(
+                 step=trigger step, request=request) -> Outcome
 6  LIFECYCLE EVALUATION (SF-A-5 §6.8, pure, reads only)
      load Task (runs.task_id FK guarantees it; LookupError is unreachable)
      build the Result and completed-Run snapshots (single `now`)
-     step is None -> action = None (a skill-targeted Run has no outcome
-                     rules; the Task is left unchanged)
-     else         -> evaluate(EvaluationInput(task, definition, done, result))
-                     exactly once
+     step None + no outcome -> action = None (a decisionless
+                 skill-targeted Run has no outcome rules; the Task is left
+                 unchanged)
+     else -> evaluate(EvaluationInput(task, definition, done, result))
+                 exactly once -- incl. a skill Run's outcome, routed via
+                 Outcome.type; a skill-targeting rule raises EvaluationError
 7  ONE TRANSACTION (`with conn:`)
      for each submission: artifacts.register_artifact(...)   # no commit
      store.insert_result(result) + `result.created` event
@@ -98,7 +107,9 @@ class CompleteRunError(Exception):
     One flat class carrying a ``code``, matching ``ResolveTaskError`` /
     ``PrepareArtifactsError``: ``"RunNotFound"``, ``"RunNotActive"``
     (SF-A-5 §6.3's identifiers), ``"RequiredArtifactsMissing"`` (§6.4),
-    ``"WorkflowMismatch"`` and ``"OutcomeNotExpected"``. Note that
+    ``"WorkflowMismatch"``, ``"StepUnresolved"`` (a skill-targeted Run
+    reporting a decision names no workflow / trigger / triggering step to
+    validate it against, SF-32) and ``"OutcomeNotExpected"``. Note that
     ``"OutcomeNotExpected"`` also arrives as ``CompletionError`` from
     :func:`completion.validate_outcome` (a step declaring no outcome rules),
     so a caller handling rejections must catch both classes. Every message
@@ -114,8 +125,8 @@ class CompleteRunError(Exception):
 class RunCompletion:
     """What completion produced: the completed Run, its one canonical Result,
     the Task in its post-completion state, the evaluated lifecycle action
-    (``None`` for a skill-targeted Run, which has no outcome rules), and the
-    Artifacts registered by this call (in submission order)."""
+    (``None`` for a decisionless skill-targeted Run, which has no outcome
+    rules), and the Artifacts registered by this call (in submission order)."""
 
     run: Run
     result: Result
@@ -155,9 +166,11 @@ def complete_run(
 
     Implements the pipeline in the module docstring verbatim. Raises
     :class:`CompleteRunError` (with ``code``) for every command-level
-    rejection, and lets ``CompletionError`` (SF-22) and ``WorkflowLoadError``
-    propagate unchanged -- both are flat classes carrying their own
-    identifiers, so re-wrapping would only lose information.
+    rejection, and lets ``CompletionError`` (SF-22), ``EvaluationError``
+    (a skill-targeted Run resolving to another skill, SF-32) and
+    ``WorkflowLoadError`` propagate unchanged -- all are flat classes
+    carrying their own identifiers, so re-wrapping would only lose
+    information.
     """
     if not isinstance(request, CompletionRequest):
         raise ValueError("complete_run() request must be a CompletionRequest")
@@ -216,15 +229,50 @@ def complete_run(
             )
 
     if step is None:
-        if request.decision is not None:
-            raise CompleteRunError(
-                "OutcomeNotExpected",
-                f"run {run.id!r} targets no workflow step, so outcome "
-                f"{request.decision!r} is not expected; complete the Run "
-                "without an outcome by running `/skillflow:complete-run` "
-                "with no `--outcome` flag",
+        if request.decision is None:
+            outcome = None
+        else:
+            # A skill-targeted Run reporting a decision (SF-32 gap-fill for
+            # SF-A-4 §9): the decision is validated against the outcome table
+            # of the step whose rule launched this Run, resolved through
+            # `triggered_by_run_id` provenance.
+            if run.workflow_definition_id is None:
+                raise CompleteRunError(
+                    "StepUnresolved",
+                    f"run {run.id!r} names no Workflow Definition, so outcome "
+                    f"{request.decision!r} has no outcome table to validate "
+                    "against; a skill-targeted Run reports through its "
+                    "triggering step -- investigate how this Run was created",
+                )
+            trigger = (
+                get_run(conn, run.triggered_by_run_id)
+                if run.triggered_by_run_id is not None
+                else None
             )
-        outcome = None
+            trigger_step_id = trigger.step_id if trigger is not None else None
+            if trigger_step_id is None:
+                raise CompleteRunError(
+                    "StepUnresolved",
+                    f"run {run.id!r} is skill-targeted but names no "
+                    "triggering step, so outcome "
+                    f"{request.decision!r} has no outcome table to validate "
+                    "against; complete the Run without an outcome by running "
+                    "`/skillflow:complete-run` with no `--outcome` flag",
+                )
+            definition = load_definition(
+                workspace.workflows_dir, run.workflow_definition_id
+            )
+            trigger_step = definition.find_step(trigger_step_id)
+            if trigger_step is None:
+                raise CompleteRunError(
+                    "WorkflowMismatch",
+                    f"run {run.id!r} was triggered from step "
+                    f"{trigger_step_id!r}, absent from workflow "
+                    f"{definition.name!r}; the definition changed under this "
+                    "Task -- restore the step, then run "
+                    "`/skillflow:complete-run`",
+                )
+            outcome = validate_outcome(step=trigger_step, request=request)
     else:
         outcome = validate_outcome(step=step, request=request)
 
@@ -245,11 +293,13 @@ def complete_run(
         outcome=outcome,
     )
     done = replace(run, status=RunStatus.COMPLETED, completed_at=now)
-    if step is None:
+    if step is None and outcome is None:
         action = None
     else:
-        # `definition` is not None here: step is only set from it. Evaluated
-        # once, before the write block, against the completed snapshots.
+        # `definition` is not None here: for a step Run it is loaded from the
+        # Run's own step above; for a skill Run reporting a decision it is
+        # loaded from the triggering step. Evaluated once, before the write
+        # block, against the completed snapshots.
         action = evaluate(
             EvaluationInput(
                 task=task, workflow=definition, current_run=done, result=result

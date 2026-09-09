@@ -69,7 +69,7 @@ def test_context_declarations():
     context = {step.id: step.context for step in workflow.steps}
     assert context == {
         "requirements": (),
-        "decomposition": ("requirements",),
+        "decomposition": ("requirements", "research"),
         "implementation": ("requirements", "plan", "review"),
         "review": ("requirements", "plan"),
     }
@@ -98,6 +98,17 @@ def test_scenario_c_research_is_a_skill_not_a_step():
     assert rule.action is ActionType.RUN
     assert (rule.skill, rule.step) == ("research", None)
     assert workflow.find_step("research") is None
+
+
+def test_scenario_c_replan_returns_to_decomposition():
+    # SF-32: the skill Run's continuation edge. `replan` is an ordinary
+    # outcome key on the review step -- reported by the research Run through
+    # the triggering-step semantics, or directly by a review that concludes
+    # the plan must be redone without research.
+    workflow = load_workflow(REFERENCE)
+    rule = workflow.find_step("review").outcomes["replan"]
+    assert rule.action is ActionType.RUN
+    assert (rule.step, rule.skill) == ("decomposition", None)
 
 
 def test_scenario_d_human_decision():

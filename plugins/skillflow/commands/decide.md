@@ -44,8 +44,9 @@ was given, ask the user for one. Never invent a decision.
    from the output:
    - step-targeted `run`: give the `/skillflow:resolve-task <task-id>`
      pointer and state that it runs in a new Claude Code session;
-   - skill-only `run`: report the skill, reason, and Task status without a
-     resolve pointer;
+   - skill-only `run`: report the skill and reason, and give the
+     `/skillflow:resolve-task <task-id>` pointer for a new Claude Code
+     session (skill-targeted Runs resolve);
    - `complete` / `cancel`: report `Task completed.` / `Task cancelled.`
    A decision never yields another `human` action, so never print a second
    `/skillflow:decide` pointer.

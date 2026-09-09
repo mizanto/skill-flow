@@ -199,14 +199,14 @@ next action, and the exact command that starts the next step
   step or command.
 - Must: write the Run summary yourself — the runtime reports
   lifecycle facts, not what the work accomplished.
-- Must: when the output names a step, give the
+- Must: when the output names a step or a skill, give the
   `/skillflow:resolve-task <task-id>` pointer and state that it runs
-  in a new session. When it names no step (terminal status, or a
-  skill-only `run` action), report the status without inventing a
-  resolve pointer.
+  in a new session (skill-targeted Runs resolve since SF-32). When it
+  names neither (terminal status, or no lifecycle action), report the
+  status without inventing a resolve pointer.
 
 Report shapes (from [`cli.py`](../src/skillflow/cli.py)
-`format_completion:238-286` and `format_decision:289-329`):
+`format_completion:257-302` and `format_decision:305-341`):
 
 Next Run (step-targeted):
 
@@ -215,6 +215,19 @@ Run <run-id> completed.
 
 Next action:
 Run <step>.
+
+Start the next Run in a new Claude Code session:
+
+/skillflow:resolve-task <task-id>
+```
+
+Next Run (skill-targeted):
+
+```text
+Run <run-id> completed.
+
+Next action:
+Run skill '<skill>' (reason: <reason>).
 
 Start the next Run in a new Claude Code session:
 
@@ -307,6 +320,7 @@ command — never to edit `.skillflow/` state (rule 6).
 | `RequiredArtifactsMissing` | Required outputs absent | Run `/skillflow:prepare-artifacts`, create them |
 | `InvalidArtifactSubmission` | Submission malformed, file unreadable/non-UTF-8, name invalid or duplicate, or type-chain mismatch | Fix the `NAME:TYPE:PATH` spec or file, re-run `/skillflow:complete-run` |
 | `InvalidOutcome` / `OutcomeRequired` / `OutcomeNotExpected` | Outcome missing, unexpected, or undeclared | Use a declared outcome, or omit it |
+| `StepUnresolved` | Skill Run names no workflow/trigger/step to validate the outcome | Re-run without `--outcome`, or escalate |
 | `WorkflowMismatch` | Step/history inconsistent | Escalate; do not invent an outcome |
 
 `decide` (codes from [`decide.py`](../src/skillflow/decide.py),

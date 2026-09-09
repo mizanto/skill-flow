@@ -45,8 +45,9 @@ creates the next Run.
    output. Never invent a different next step or command:
    - step-targeted `run`: give the `/skillflow:resolve-task <task-id>`
      pointer and state that it runs in a new Claude Code session;
-   - skill-only `run`: report the skill, reason, and Task status without a
-     resolve pointer;
+   - skill-only `run`: report the skill and reason, and give the
+     `/skillflow:resolve-task <task-id>` pointer for a new Claude Code
+     session (skill-targeted Runs resolve);
    - `human`: report that a human decision is required and give
      `/skillflow:decide <decision>`;
    - `complete` / `cancel`: report the terminal Task status.
@@ -68,6 +69,9 @@ work around a rejection by editing anything under `.skillflow/`.
   mismatch with the established chain).
 - `InvalidOutcome` / `OutcomeRequired` / `OutcomeNotExpected`: use a
   step-declared outcome, or omit the flag.
+- `StepUnresolved`: the skill-targeted Run names no workflow, trigger, or
+  triggering step to validate the outcome against. Re-run without
+  `--outcome`, or escalate to the user.
 - `RunNotFound` / `RunNotActive`: resolve and start the Run first with
   `/skillflow:resolve-task <task-id>`.
 - `WorkflowMismatch`: history is inconsistent with completion. Escalate to the

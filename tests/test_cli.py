@@ -29,7 +29,11 @@ from skillflow.domain import (
 from skillflow.evaluator import EvaluationOutput
 from skillflow.outputs import OutputCheck, OutputValidation
 from skillflow.prepare_artifacts import ArtifactReport
-from skillflow.run_input import RunInput, resolve_run_input
+from skillflow.run_input import (
+    RunInput,
+    resolve_run_input,
+    resolve_skill_run_input,
+)
 from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType, ExpectedOutput, WorkflowStep
 from skillflow.workflow_loader import load_workflow
@@ -252,6 +256,20 @@ def test_format_omits_absent_model_and_effort():
 
     assert "Execution:" not in rendered
     assert "Expected outputs: none declared" in rendered
+
+
+def test_format_renders_skill_run_without_a_step_line():
+    task, run = _task_and_run(step_id=None)
+    rendered = format_run_input(
+        resolve_skill_run_input(task=task, run=run, skill="research", artifacts=[])
+    )
+
+    assert "Run run-1 (running) -- skill 'research' (no workflow step)" in rendered
+    assert "-- step" not in rendered
+    assert "via skill" not in rendered
+    assert "Expected outputs: none declared" in rendered
+    assert "`/skillflow:complete-run`" in rendered
+    assert "/skillflow:prepare-artifacts" not in rendered
 
 
 # --- prepare-artifacts ------------------------------------------------------
@@ -629,6 +647,35 @@ def test_complete_run_human_required_parks_task(cli_conn, cli_ws, capsys):
     capsys.readouterr()
     assert main(["resolve-task", task.id]) == 1
     assert "waiting_for_human" in capsys.readouterr().err
+
+
+def test_complete_run_skill_targeting_skill_exits_one(cli_conn, cli_ws, capsys):
+    # Approver decision 5, through the real CLI: research reporting
+    # fundamental_assumption_wrong is rejected at evaluation, and the CLI
+    # maps EvaluationError to exit 1 with stderr only.
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="fundamental_assumption_wrong",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+    assert main(["resolve-task", task.id]) == 0
+    skill_run = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert skill_run.step_id is None
+    capsys.readouterr()
+
+    assert _complete_cli(cli_conn, cli_ws, outcome="fundamental_assumption_wrong") == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "must not target another skill" in captured.err
+    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, skill_run.id) is None
 
 
 def test_complete_run_without_running_run_exits_one(cli_conn, capsys):
@@ -1140,17 +1187,29 @@ def test_complete_run_skill_targeted_run_completes(cli_conn, cli_ws, capsys):
     assert len(store.list_runs_for_task(cli_conn, task.id)) == runs_before
 
 
-def test_complete_run_skill_targeted_run_rejects_outcome(cli_conn, cli_ws, capsys):
-    _, skill_run = _seed_skill_targeted_run(cli_conn, cli_ws)
+def test_complete_run_skill_targeted_run_reports_trigger_step_outcome(
+    cli_conn, cli_ws, capsys
+):
+    # SF-32: the decision validates against the triggering step's table --
+    # here `ready` on requirements -- and evaluates like a step Run's.
+    task, skill_run = _seed_skill_targeted_run(cli_conn, cli_ws)
+    runs_before = len(store.list_runs_for_task(cli_conn, task.id))
     capsys.readouterr()
 
-    assert main(["complete-run", "--outcome", "ready"]) == 1
+    assert main(["complete-run", "--outcome", "ready"]) == 0
 
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "is not expected" in captured.err
-    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.RUNNING
-    assert store.get_result_for_run(cli_conn, skill_run.id) is None
+    out = capsys.readouterr().out
+    assert f"Run {skill_run.id} completed." in out
+    assert "Run decomposition." in out
+    assert f"/skillflow:resolve-task {task.id}" in out
+    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.COMPLETED
+    result = store.get_result_for_run(cli_conn, skill_run.id)
+    assert (result.outcome.type, result.outcome.decision) == (
+        "requirements",
+        "ready",
+    )
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == runs_before
 
 
 # --- format_completion ------------------------------------------------------
@@ -1201,7 +1260,9 @@ def test_format_completion_run_with_step():
     )
 
 
-def test_format_completion_run_with_skill_has_no_resolve_pointer():
+def test_format_completion_run_with_skill_points_at_resolve_task():
+    # SF-32 flips the SF-29 rationale: skill-targeted Runs resolve, so the
+    # pointer is printed.
     completion = _completion(
         action=EvaluationOutput(
             action=ActionType.RUN,
@@ -1218,12 +1279,10 @@ def test_format_completion_run_with_skill_has_no_resolve_pointer():
         "Next action:\n"
         "Run skill 'research' (reason: fundamental_assumption_wrong).\n"
         "\n"
-        "Task status:\n"
-        "active"
+        "Start the next Run in a new Claude Code session:\n"
+        "\n"
+        "/skillflow:resolve-task task-1"
     )
-    # resolve-task rejects skill-only actions, so the formatter must not
-    # print a pointer that would fail.
-    assert "/skillflow:resolve-task" not in rendered
 
 
 def test_format_completion_human():
@@ -1501,7 +1560,7 @@ def test_format_decision_run_with_step():
     )
 
 
-def test_format_decision_run_with_skill_only():
+def test_format_decision_run_with_skill_points_at_resolve_task():
     record = _record(
         action=EvaluationOutput(
             action=ActionType.RUN, reason="research", skill="research"
@@ -1514,8 +1573,9 @@ def test_format_decision_run_with_skill_only():
         "Next action:\n"
         "Run skill 'research' (reason: research).\n"
         "\n"
-        "Task status:\n"
-        "active"
+        "Start the next Run in a new Claude Code session:\n"
+        "\n"
+        "/skillflow:resolve-task task-1"
     )
 
 
