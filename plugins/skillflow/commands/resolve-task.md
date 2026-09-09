@@ -58,8 +58,9 @@ anything under `.skillflow/`.
 - `TaskAlreadyCompleted` / `TaskCancelled`: the Task is terminal; there is
   nothing to run.
 - `WorkflowMismatch` / `NoLifecycleAction` / `RunNotCompleted` /
-  `ResultMissing`: history is inconsistent with a new Run. Escalate to the
-  user; do not invent a step.
+  `ResultMissing` / `StepUnresolved`: history is inconsistent with a new
+  Run, or a skill retry target cannot be resolved. Escalate to the user;
+  do not invent a step.
 
 ## Rules
 

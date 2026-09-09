@@ -205,7 +205,8 @@ def find_repo_root(start: Path | None = None) -> Path:
         if any((directory / marker).exists() for marker in _MARKERS):
             return directory
     raise RepositoryRootNotFoundError(
-        f"no .skillflow or .git marker found in {start} or any parent directory"
+        f"no .skillflow or .git marker found in {start} or any parent "
+        "directory; run the command from inside the target repository"
     )
 
 
@@ -256,8 +257,10 @@ def connect(workspace: Workspace) -> sqlite3.Connection:
     """
     if not workspace.db_path.exists():
         raise WorkspaceError(
-            f"workspace database does not exist: {workspace.db_path} "
-            f"(run init_workspace first)"
+            f"workspace database does not exist: {workspace.db_path}; the "
+            "workspace is not initialised -- initialise it with "
+            "`skillflow.workspace.init_workspace()` (Python API) from the "
+            "repository root, then re-run the command"
         )
     conn = _open_db(workspace.db_path, create=False)
     conn.row_factory = sqlite3.Row

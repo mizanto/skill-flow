@@ -300,6 +300,19 @@ A rejected command never partially applies a lifecycle transition
 was; recovery is always to fix the named cause and re-invoke the same
 command — never to edit `.skillflow/` state (rule 6).
 
+Every rejection is printed to stderr (exit code 1, stdout empty) in one
+uniform envelope:
+
+```text
+skillflow <command>: <CODE>: <what happened and how to recover>
+<what state was left unchanged>
+```
+
+`<CODE>` is the stable rejection identifier from the tables below (or the
+lower-layer error name, e.g. `EvaluationError`, when the rejection carries
+no code). The second line always states the preserved state, e.g. no Run
+was created, or no Result was created and no Run status changed.
+
 `resolve-task` (codes from [`resolve_task.py`](../src/skillflow/resolve_task.py)):
 
 | Code | Meaning | Recovery |
@@ -308,7 +321,8 @@ command — never to edit `.skillflow/` state (rule 6).
 | `TaskAlreadyCompleted` / `TaskCancelled` | Task is terminal | Nothing to run |
 | `HumanDecisionRequired` | Task waits for human | Use `/skillflow:decide` |
 | `ActiveRunExists` | A Run is already `running` | Do not resolve again |
-| `WorkflowMismatch` / `NoLifecycleAction` / `RunNotCompleted` / `ResultMissing` | History/workflow inconsistent with a new Run | Escalate; do not invent a step |
+| `WorkflowSelectionRequired` | Task has no Workflow | Ask the user, re-run with `--workflow <id>` |
+| `WorkflowMismatch` / `NoLifecycleAction` / `RunNotCompleted` / `ResultMissing` / `StepUnresolved` | History/workflow inconsistent with a new Run | Escalate; do not invent a step |
 
 `prepare-artifacts` (codes from
 [`prepare_artifacts.py`](../src/skillflow/prepare_artifacts.py)):
@@ -344,4 +358,16 @@ command — never to edit `.skillflow/` state (rule 6).
 | `AmbiguousCurrentTask` | Several Tasks waiting | Re-run with `--task <task-id>` |
 | `InvalidHumanDecision` | Decision not allowed by step | Use an allowed decision |
 | `RunNotFound` / `RunNotCompleted` / `ResultMissing` / `StepUnresolved` / `WorkflowMismatch` | History/workflow inconsistent | Escalate; do not invent a decision |
+
+`fail-run` (codes from [`fail_run.py`](../src/skillflow/fail_run.py) and
+[`cli.py`](../src/skillflow/cli.py) `_load_submissions`/`_load_diagnostics`):
+
+| Code | Meaning | Recovery |
+|---|---|---|
+| `RunNotFound` / `RunNotActive` | No `running` Run to fail | Resolve/start the Run first |
+| `AmbiguousCurrentRun` | Several Runs `running` in workspace | Re-run with `--task <task-id>` |
+| `TaskNotFound` | No Task with that id | Check the id |
+| `StepUnresolved` | Retry target cannot be resolved | Escalate; do not invent a target |
+| `InvalidDiagnostics` | Blank `--message`, or unreadable/non-UTF-8 diagnostics file | Fix the flag or file, re-run |
+| `InvalidArtifactSubmission` | Submission malformed, file unreadable/non-UTF-8, name invalid or duplicate, or type-chain mismatch | Fix the `NAME:TYPE:PATH` spec or file, re-run |
 

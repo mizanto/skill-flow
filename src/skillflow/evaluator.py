@@ -137,6 +137,11 @@ class WorkflowSelectionRequiredError(Exception):
     which Workflow this Task follows". Flat, like ``EvaluationError`` itself.
     """
 
+    #: The stable identifier the CLI error envelope reports for this signal
+    #: (SF-37), matching the name skill docs and the operational protocol use.
+    #: A class attribute on purpose: both raise sites pass only a message.
+    code = "WorkflowSelectionRequired"
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class EvaluationInput:
@@ -315,7 +320,9 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
                 raise EvaluationError(
                     f"run {run.id!r} names step {run.step_id!r}, absent from "
                     f"workflow {evaluation.workflow.name!r}; the failed Run "
-                    "cannot retry a step the definition no longer declares"
+                    "cannot retry a step the definition no longer declares; "
+                    "restore the step in the definition file, then re-run "
+                    "the command"
                 )
             return EvaluationOutput(
                 action=ActionType.RUN,
@@ -345,14 +352,17 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
         if step is None:
             raise EvaluationError(
                 f"run {run.id!r} names step {result.outcome.type!r} in its "
-                f"outcome, absent from workflow {evaluation.workflow.name!r}"
+                f"outcome, absent from workflow {evaluation.workflow.name!r}; "
+                "restore the step in the definition file, then re-run "
+                "the command"
             )
     else:
         step = evaluation.workflow.find_step(run.step_id)
         if step is None:
             raise EvaluationError(
                 f"run {run.id!r} names step {run.step_id!r}, absent from workflow "
-                f"{evaluation.workflow.name!r}"
+                f"{evaluation.workflow.name!r}; restore the step in the "
+                "definition file, then re-run the command"
             )
 
     if evaluation.human_decision is not None:
@@ -374,8 +384,10 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
             accepted = ", ".join(repr(k) for k in sorted(step.outcomes))
             raise EvaluationError(
                 f"run {run.id!r} produced a Result with no outcome, but step "
-                f"{step.id!r} declares outcome rules; complete the Run with one "
-                f"of: [{accepted}]"
+                f"{step.id!r} declares outcome rules (it now accepts one of: "
+                f"[{accepted}]); the definition changed under this Run or "
+                "its history was edited -- restore the definition, then "
+                "re-run the command"
             )
         key = result.outcome.decision
         table = step.outcomes
@@ -385,14 +397,16 @@ def evaluate(evaluation: EvaluationInput) -> EvaluationOutput:
     if rule is None:
         accepted = ", ".join(repr(k) for k in sorted(table))
         raise EvaluationError(
-            f"step {step.id!r} has no rule for {kind} {key!r}; accepted: [{accepted}]"
+            f"step {step.id!r} has no rule for {kind} {key!r}; accepted: [{accepted}]; "
+            "restore the rule in the definition file, then re-run the command"
         )
 
     if run.step_id is None and rule.action is ActionType.RUN and rule.skill is not None:
         raise EvaluationError(
             f"run {run.id!r} is skill-targeted, so {kind} {key!r} must not "
             f"target another skill (skill {rule.skill!r}); a skill-targeted "
-            "Run resolves to a step, human, complete, or cancel"
+            "Run resolves to a step, human, complete, or cancel -- fix the "
+            "rule in the definition file, then re-run the command"
         )
 
     return EvaluationOutput(

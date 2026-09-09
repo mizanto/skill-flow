@@ -146,7 +146,7 @@ def validate_decision(*, step: WorkflowStep, request: DecisionRequest) -> str:
             "InvalidHumanDecision",
             f"step {step.id!r} has no decision {request.decision!r}; "
             f"accepted: [{accepted}] -- re-run as "
-            "`/skillflow:decide <decision>`",
+            "`skillflow decide <decision>`",
         )
 
     return request.decision

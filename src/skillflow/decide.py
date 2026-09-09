@@ -208,7 +208,7 @@ def decide(
             "HumanDecisionNotExpected",
             f"task {task.id!r} is 'active', not 'waiting_for_human'; only a "
             "waiting Task takes a decision -- finish the current Run with "
-            "`/skillflow:complete-run`, or start one with "
+            "`skillflow complete-run`, or start one with "
             f"`skillflow resolve-task {task.id}`",
         )
 
@@ -226,7 +226,7 @@ def decide(
             "RunNotCompleted",
             f"latest run {current.id!r} of task {task.id!r} is "
             f"{current.status.value!r}; a decision answers a completed Run's "
-            "human outcome -- finish the Run with `/skillflow:complete-run`",
+            "human outcome -- finish the Run with `skillflow complete-run`",
         )
 
     if current.workflow_definition_id is None:
@@ -265,7 +265,7 @@ def decide(
                 f"run {current.id!r} names step {result.outcome.type!r} in "
                 f"its outcome, absent from workflow {definition.name!r}; the "
                 "definition changed under this Task -- restore the step, "
-                "then run `/skillflow:decide <decision>`",
+                "then run `skillflow decide <decision>`",
             )
     else:
         step = definition.find_step(current.step_id)
@@ -275,7 +275,7 @@ def decide(
                 f"run {current.id!r} targets step {current.step_id!r}, absent "
                 f"from workflow {definition.name!r}; the definition changed "
                 "under this Task -- restore the step, then run "
-                "`/skillflow:decide <decision>`",
+                "`skillflow decide <decision>`",
             )
 
         result = get_result_for_run(conn, current.id)

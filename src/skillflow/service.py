@@ -280,7 +280,8 @@ def assign_workflow(
     if task.workflow_definition_id is not None:
         raise WorkflowAssignmentError(
             f"task {task.id!r} is already assigned to workflow "
-            f"{task.workflow_definition_id!r}; reassignment is not supported"
+            f"{task.workflow_definition_id!r}; reassignment is not supported "
+            "-- re-run without `--workflow` to keep the current assignment"
         )
     if store.get_workflow_definition(conn, updated.workflow_definition_id) is None:
         raise UnknownWorkflowError(

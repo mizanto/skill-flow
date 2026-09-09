@@ -205,7 +205,7 @@ def complete_run(
                 f"run {run.id!r} targets step {run.step_id!r}, absent from "
                 f"workflow {definition.name!r}; the definition changed under "
                 "this Run -- restore the step, then run "
-                "`/skillflow:complete-run`",
+                "`skillflow complete-run`",
             )
 
     if step is None:
@@ -225,8 +225,8 @@ def complete_run(
                 "RequiredArtifactsMissing",
                 f"run {run.id!r} is missing required artifacts of type "
                 f"{missing}; create them as ordinary files, then re-run "
-                "`/skillflow:complete-run` -- or inspect the gap with "
-                "`/skillflow:prepare-artifacts`",
+                "`skillflow complete-run` -- or inspect the gap with "
+                "`skillflow prepare-artifacts`",
             )
 
     if step is None:
@@ -258,7 +258,7 @@ def complete_run(
                     "triggering step, so outcome "
                     f"{request.decision!r} has no outcome table to validate "
                     "against; complete the Run without an outcome by running "
-                    "`/skillflow:complete-run` with no `--outcome` flag",
+                    "`skillflow complete-run` with no `--outcome` flag",
                 )
             definition = load_definition(
                 workspace.workflows_dir, run.workflow_definition_id
@@ -271,7 +271,7 @@ def complete_run(
                     f"{trigger_step_id!r}, absent from workflow "
                     f"{definition.name!r}; the definition changed under this "
                     "Task -- restore the step, then run "
-                    "`/skillflow:complete-run`",
+                    "`skillflow complete-run`",
                 )
             outcome = validate_outcome(step=trigger_step, request=request)
     else:

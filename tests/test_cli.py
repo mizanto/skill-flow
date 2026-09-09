@@ -10,6 +10,7 @@ from skillflow.cli import (
     format_artifact_report,
     format_completion,
     format_decision,
+    format_error,
     format_failure,
     format_run_input,
     main,
@@ -27,10 +28,15 @@ from skillflow.domain import (
     Task,
     TaskStatus,
 )
-from skillflow.evaluator import EvaluationOutput
+from skillflow.evaluator import (
+    EvaluationError,
+    EvaluationOutput,
+    WorkflowSelectionRequiredError,
+)
 from skillflow.fail_run import RunFailure
 from skillflow.outputs import OutputCheck, OutputValidation
 from skillflow.prepare_artifacts import ArtifactReport
+from skillflow.resolve_task import ResolveTaskError
 from skillflow.run_input import (
     RunInput,
     resolve_run_input,
@@ -142,6 +148,10 @@ def test_resolve_task_unknown_task_exits_one_with_stderr_only(cli_conn, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "no task" in captured.err
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow resolve-task: TaskNotFound: ")
+    assert lines[-1] == "No Run was created."
+    assert store.list_runs_for_task(cli_conn, "task-nope") == []
 
 
 def test_resolve_task_selection_error_lists_definitions(cli_conn, capsys):
@@ -152,6 +162,25 @@ def test_resolve_task_selection_error_lists_definitions(cli_conn, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "software-change" in captured.err
+
+
+def test_resolve_task_workflow_reassignment_suggests_omitting_workflow(
+    cli_conn, cli_ws, capsys
+):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    (cli_ws.workflows_dir / "other.yaml").write_text(
+        "name: other\nsteps:\n  - id: only\n    skill: do-it\n", encoding="utf-8"
+    )
+
+    assert main(["resolve-task", task.id, "--workflow", "other"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "skillflow resolve-task: WorkflowAssignmentError: " in captured.err
+    assert "re-run without `--workflow`" in captured.err
+    assert captured.err.splitlines()[-1] == "No Run was created."
+    assert store.get_task(cli_conn, task.id).workflow_definition_id == "software-change"
+    assert store.list_runs_for_task(cli_conn, task.id) == []
 
 
 # --- format_run_input -----------------------------------------------------
@@ -293,6 +322,9 @@ def test_prepare_artifacts_without_running_run_exits_one(cli_conn, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "resolve-task" in captured.err
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow prepare-artifacts: RunNotFound: ")
+    assert lines[-1] == "Nothing was changed: this command only inspects state."
 
 
 def test_prepare_artifacts_reports_missing_outputs(cli_conn, capsys):
@@ -676,6 +708,11 @@ def test_complete_run_skill_targeting_skill_exits_one(cli_conn, cli_ws, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "must not target another skill" in captured.err
+    assert "skillflow complete-run: EvaluationError: " in captured.err
+    assert "fix the rule in the definition file" in captured.err
+    assert captured.err.splitlines()[-1] == (
+        "No Result was created; no Run status was changed."
+    )
     assert store.get_run(cli_conn, skill_run.id).status is RunStatus.RUNNING
     assert store.get_result_for_run(cli_conn, skill_run.id) is None
 
@@ -783,7 +820,10 @@ def test_complete_run_missing_artifact_leaves_run_running(cli_conn, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "requirements" in captured.err
-    assert "/skillflow:prepare-artifacts" in captured.err
+    assert "skillflow prepare-artifacts" in captured.err
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow complete-run: RequiredArtifactsMissing: ")
+    assert lines[-1] == "No Result was created; no Run status was changed."
     assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
     assert store.get_result_for_run(cli_conn, run.id) is None
     assert store.list_artifacts_for_run(cli_conn, run.id) == []
@@ -1475,6 +1515,9 @@ def test_decide_active_task_exits_one(cli_conn, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "active" in captured.err
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow decide: HumanDecisionNotExpected: ")
+    assert lines[-1] == "No decision was recorded; no Task status was changed."
     assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
     assert store.list_human_decisions_for_task(cli_conn, task.id) == []
 
@@ -1772,6 +1815,21 @@ def test_fail_run_without_running_run_exits_one(cli_conn, capsys):
     assert "resolve-task" in captured.err
 
 
+def test_fail_run_blank_message_reports_envelope(cli_conn, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["fail-run", "--message", "  "]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow fail-run: InvalidDiagnostics: ")
+    assert lines[-1] == "No failure was recorded; no Run status was changed."
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
 def test_fail_run_task_selects_the_named_task(cli_conn, cli_ws, capsys):
     task_a, run_a = _resolve_cli_task(cli_conn, title="First")
     task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
@@ -1876,3 +1934,77 @@ def test_format_failure_non_run_action_raises():
 
     with pytest.raises(ValueError, match="always retries as 'run'"):
         format_failure(failure)
+
+
+# --- format_error (SF-37) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "unchanged"),
+    [
+        ("resolve-task", "No Run was created."),
+        (
+            "prepare-artifacts",
+            "Nothing was changed: this command only inspects state.",
+        ),
+        ("complete-run", "No Result was created; no Run status was changed."),
+        ("decide", "No decision was recorded; no Task status was changed."),
+        ("fail-run", "No failure was recorded; no Run status was changed."),
+    ],
+)
+def test_format_error_envelope_per_command(command, unchanged):
+    err = ResolveTaskError("TaskNotFound", "no task with id 'task-nope'")
+
+    assert format_error(command, err) == (
+        f"skillflow {command}: TaskNotFound: no task with id 'task-nope'\n{unchanged}"
+    )
+
+
+def test_format_error_uses_class_name_when_no_code():
+    err = EvaluationError("step 'review' has no rule for outcome 'bogus'")
+
+    assert format_error("complete-run", err) == (
+        "skillflow complete-run: EvaluationError: "
+        "step 'review' has no rule for outcome 'bogus'\n"
+        "No Result was created; no Run status was changed."
+    )
+
+
+def test_format_error_reports_workflow_selection_required_code():
+    err = WorkflowSelectionRequiredError("task 'task-1' has no Workflow Definition")
+
+    assert format_error("resolve-task", err) == (
+        "skillflow resolve-task: WorkflowSelectionRequired: "
+        "task 'task-1' has no Workflow Definition\n"
+        "No Run was created."
+    )
+
+
+def test_command_outside_repository_names_recovery(tmp_path, monkeypatch, capsys):
+    # tmp_path lives under the system temp root, which has no .git/.skillflow
+    # above it (see test_workspace.py) -- so repo-root discovery fails.
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["resolve-task", "task-1"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "skillflow resolve-task: RepositoryRootNotFoundError: " in captured.err
+    assert "from inside the target repository" in captured.err
+    assert captured.err.splitlines()[-1] == "No Run was created."
+
+
+def test_command_in_uninitialised_repo_points_at_init_workspace(
+    tmp_path, monkeypatch, capsys
+):
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["resolve-task", "task-1"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "skillflow resolve-task: WorkspaceError: " in captured.err
+    assert "init_workspace" in captured.err
+    assert "run init_workspace first" not in captured.err
+    assert captured.err.splitlines()[-1] == "No Run was created."

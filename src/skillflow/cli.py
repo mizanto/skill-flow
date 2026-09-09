@@ -410,6 +410,38 @@ def format_failure(failure: RunFailure) -> str:
     return "\n".join(lines)
 
 
+#: Unchanged-state sentence appended to every rejection of each command
+#: (SF-37). Each sentence is true on EVERY exit-1 path of its command:
+#: ``resolve-task`` rejects only before Run creation (step 9), so it claims
+#: just that -- a step-4 ``--workflow`` assignment may persist;
+#: ``prepare-artifacts`` never writes; ``complete-run``/``decide``/
+#: ``fail-run`` reject before their single write block or roll it back
+#: (SF-36). The mutating commands' sentences presuppose no identified
+#: Run/Task, since loader errors precede resolution.
+_UNCHANGED_STATE = {
+    "resolve-task": "No Run was created.",
+    "prepare-artifacts": "Nothing was changed: this command only inspects state.",
+    "complete-run": "No Result was created; no Run status was changed.",
+    "decide": "No decision was recorded; no Task status was changed.",
+    "fail-run": "No failure was recorded; no Run status was changed.",
+}
+
+
+def format_error(command: str, exc: Exception) -> str:
+    """Render a caught rejection as the uniform stderr envelope (SF-37).
+
+    Pure formatting: ``skillflow <command>: <CODE>: <message>`` on line 1
+    and the command's unchanged-state sentence on line 2. ``CODE`` is the
+    exception's ``code`` attribute when present, else the class name, so
+    both coded rejections (``RequiredArtifactsMissing``) and flat lower
+    layer errors (``EvaluationError``) surface a stable identifier. The
+    original message is preserved verbatim. No lifecycle state is
+    re-derived here.
+    """
+    code = getattr(exc, "code", type(exc).__name__)
+    return f"skillflow {command}: {code}: {exc}\n{_UNCHANGED_STATE[command]}"
+
+
 def _run_prepare_artifacts(*, task_id: str | None) -> int:
     """Execute ``prepare-artifacts``; return a process exit code."""
     try:
@@ -426,7 +458,7 @@ def _run_prepare_artifacts(*, task_id: str | None) -> int:
         WorkflowLoadError,
         WorkspaceError,
     ) as exc:
-        print(str(exc), file=sys.stderr)
+        print(format_error("prepare-artifacts", exc), file=sys.stderr)
         return 1
     print(format_artifact_report(result))
     return 0
@@ -499,7 +531,7 @@ def _check_submission_name(
     name: str,
     spec: str,
     error_cls: type[CompleteRunError] | type[FailRunError] = CompleteRunError,
-    rerun: str = "`/skillflow:complete-run`",
+    rerun: str = "`skillflow complete-run`",
 ) -> None:
     """Reject ``name`` unless it is a plain filename.
 
@@ -529,7 +561,7 @@ def _load_submissions(
     specs: list[str],
     *,
     error_cls: type[CompleteRunError] | type[FailRunError] = CompleteRunError,
-    rerun: str = "`/skillflow:complete-run`",
+    rerun: str = "`skillflow complete-run`",
 ) -> list[ArtifactSubmission]:
     """Read ``--artifact NAME:TYPE:PATH`` specs into submissions.
 
@@ -663,7 +695,7 @@ def _run_resolve_task(*, task_id: str, workflow: str | None) -> int:
         service.RunCreationError,
         store.InvariantViolationError,
     ) as exc:
-        print(str(exc), file=sys.stderr)
+        print(format_error("resolve-task", exc), file=sys.stderr)
         return 1
     print(format_run_input(result))
     return 0
@@ -682,7 +714,7 @@ def _run_complete_run(
             raise CompletionError(
                 "InvalidOutcome",
                 "empty --outcome; omit the flag or pass a non-empty outcome, "
-                "then re-run `/skillflow:complete-run`",
+                "then re-run `skillflow complete-run`",
             )
         ws = workspace.Workspace(root=workspace.find_repo_root())
         with contextlib.closing(store.open_store(ws)) as conn:
@@ -711,7 +743,7 @@ def _run_complete_run(
         ArtifactStorageError,
         store.InvariantViolationError,
     ) as exc:
-        print(str(exc), file=sys.stderr)
+        print(format_error("complete-run", exc), file=sys.stderr)
         return 1
     print(format_completion(result))
     return 0
@@ -728,7 +760,7 @@ def _run_decide(*, task_id: str | None, decision: str, comment: str | None) -> i
             raise DecisionError(
                 "InvalidHumanDecision",
                 "empty decision; pass a decision declared by the current "
-                "step, then re-run `/skillflow:decide <decision>`",
+                "step, then re-run `skillflow decide <decision>`",
             )
         ws = workspace.Workspace(root=workspace.find_repo_root())
         with contextlib.closing(store.open_store(ws)) as conn:
@@ -754,7 +786,7 @@ def _run_decide(*, task_id: str | None, decision: str, comment: str | None) -> i
         WorkspaceError,
         store.InvariantViolationError,
     ) as exc:
-        print(str(exc), file=sys.stderr)
+        print(format_error("decide", exc), file=sys.stderr)
         return 1
     print(format_decision(result))
     return 0
@@ -808,7 +840,7 @@ def _run_fail_run(
         ArtifactStorageError,
         store.InvariantViolationError,
     ) as exc:
-        print(str(exc), file=sys.stderr)
+        print(format_error("fail-run", exc), file=sys.stderr)
         return 1
     print(format_failure(result))
     return 0

@@ -173,14 +173,14 @@ def prepare_artifacts(
             "StepUnresolved",
             f"run {run.id!r} names no Workflow Definition, so it has no "
             "declared outputs; record its outcome with "
-            "`/skillflow:complete-run`",
+            "`skillflow complete-run`",
         )
     if run.step_id is None:
         raise PrepareArtifactsError(
             "StepUnresolved",
             f"run {run.id!r} targets no workflow step (a skill-targeted Run, "
             "SF-A-4 §9), so it has no declared outputs; record its outcome "
-            "with `/skillflow:complete-run`",
+            "with `skillflow complete-run`",
         )
     definition = load_definition(workspace.workflows_dir, run.workflow_definition_id)
     step = definition.find_step(run.step_id)

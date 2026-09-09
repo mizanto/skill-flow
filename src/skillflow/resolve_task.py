@@ -137,7 +137,8 @@ def resolve_task(
         raise ResolveTaskError(
             "HumanDecisionRequired",
             f"task {task.id!r} is 'waiting_for_human'; record a decision with "
-            f"`/skillflow:decide`, then run `skillflow resolve-task {task.id}`",
+            "`skillflow decide <decision>`, then run "
+            f"`skillflow resolve-task {task.id}`",
         )
 
     runs = list_runs_for_task(conn, task.id)
@@ -146,7 +147,7 @@ def resolve_task(
         raise ResolveTaskError(
             "ActiveRunExists",
             f"task {task.id!r} already has running run {running.id!r}; finish "
-            "it with `/skillflow:complete-run` before resolving another Run",
+            "it with `skillflow complete-run` before resolving another Run",
         )
 
     if task.workflow_definition_id is None and workflow is None:
@@ -218,7 +219,7 @@ def resolve_task(
         result = get_result_for_run(conn, current.id)
         if result is None:
             hint = (
-                "record it with `/skillflow:complete-run`"
+                "record it with `skillflow complete-run`"
                 if current.status is RunStatus.COMPLETED
                 else "investigate the Run history (a failed Run cannot complete)"
             )
@@ -280,13 +281,15 @@ def resolve_task(
     if action.action is not ActionType.RUN:
         if action.action is ActionType.HUMAN:
             hint = (
-                "record a decision with `/skillflow:decide`, then run "
-                f"`skillflow resolve-task {task.id}`"
+                "record a decision with `skillflow decide <decision>`, then "
+                f"run `skillflow resolve-task {task.id}`"
             )
         else:
             hint = (
-                "the Task should already be terminal; apply the outcome with "
-                "`/skillflow:complete-run` on the current Run"
+                "the Task should already be terminal -- the definition "
+                "changed under this Task or its history was edited; restore "
+                "the definition, then run "
+                f"`skillflow resolve-task {task.id}`"
             )
         raise ResolveTaskError(
             "NoLifecycleAction",

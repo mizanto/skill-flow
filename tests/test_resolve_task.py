@@ -234,7 +234,7 @@ def test_waiting_for_human_task_is_rejected(conn, ws, workflows):
     with pytest.raises(ResolveTaskError) as exc_info:
         resolve(conn, ws, task_id=task.id)
     assert exc_info.value.code == "HumanDecisionRequired"
-    assert "/skillflow:decide" in str(exc_info.value)
+    assert "skillflow decide <decision>" in str(exc_info.value)
     assert _runs(conn) == []
 
 
@@ -588,7 +588,7 @@ def test_human_action_points_at_decide(conn, ws, workflows):
     with pytest.raises(ResolveTaskError) as exc_info:
         resolve(conn, ws, task_id=task.id)
     assert exc_info.value.code == "NoLifecycleAction"
-    assert "/skillflow:decide" in str(exc_info.value)
+    assert "skillflow decide <decision>" in str(exc_info.value)
     assert len(store.list_runs_for_task(conn, task.id)) == 4
 
 

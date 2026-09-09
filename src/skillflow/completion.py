@@ -186,7 +186,7 @@ def validate_outcome(
                 "OutcomeNotExpected",
                 f"step {step.id!r} declares no outcomes, so outcome "
                 f"{request.decision!r} is not expected; complete the Run "
-                "without an outcome by running `/skillflow:complete-run` "
+                "without an outcome by running `skillflow complete-run` "
                 "with no `--outcome` flag",
             )
         return None
@@ -197,7 +197,7 @@ def validate_outcome(
             "OutcomeRequired",
             f"step {step.id!r} requires a lifecycle outcome; complete the "
             f"Run with one of: [{accepted}] -- re-run as "
-            "`/skillflow:complete-run --outcome <value>`",
+            "`skillflow complete-run --outcome <value>`",
         )
 
     if request.decision not in step.outcomes:
@@ -206,7 +206,7 @@ def validate_outcome(
             "InvalidOutcome",
             f"step {step.id!r} has no outcome {request.decision!r}; "
             f"accepted: [{accepted}] -- re-run as "
-            "`/skillflow:complete-run --outcome <value>`",
+            "`skillflow complete-run --outcome <value>`",
         )
 
     return Outcome(type=step.id, decision=request.decision)

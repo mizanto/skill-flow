@@ -224,7 +224,7 @@ def test_unknown_key_rejected_naming_value_and_accepted_keys():
     msg = str(exc_info.value)
     assert "maybe_everything_is_fine" in msg
     assert "'approve'" in msg and "'request_changes'" in msg
-    assert "/skillflow:decide" in msg
+    assert "skillflow decide <decision>" in msg
 
 
 def test_outcome_key_is_not_accepted_as_a_decision():
