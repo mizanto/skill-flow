@@ -6,14 +6,29 @@ import pytest
 
 from skillflow import __version__, store, workspace
 from skillflow.artifacts import create_artifact
-from skillflow.cli import format_artifact_report, format_run_input, main
+from skillflow.cli import (
+    format_artifact_report,
+    format_completion,
+    format_run_input,
+    main,
+)
+from skillflow.complete_run import RunCompletion
 from skillflow.context import ContextSelection
-from skillflow.domain import Artifact, Run, RunStatus, Task, TaskStatus
+from skillflow.domain import (
+    Artifact,
+    Result,
+    ResultStatus,
+    Run,
+    RunStatus,
+    Task,
+    TaskStatus,
+)
+from skillflow.evaluator import EvaluationOutput
 from skillflow.outputs import OutputCheck, OutputValidation
 from skillflow.prepare_artifacts import ArtifactReport
 from skillflow.run_input import RunInput, resolve_run_input
-from skillflow.service import create_task, register_workflow
-from skillflow.workflow import ExpectedOutput, WorkflowStep
+from skillflow.service import create_run, create_task, register_workflow
+from skillflow.workflow import ActionType, ExpectedOutput, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
 REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
@@ -468,3 +483,793 @@ def test_format_report_optional_only_missing_stays_complete():
     assert "All required artifacts are already prepared." in rendered
     assert "/skillflow:complete-run" in rendered
     assert "Please create the missing artifact" not in rendered
+
+
+# --- complete-run -----------------------------------------------------------
+
+
+def _write_artifact_file(cli_ws, name, content=None):
+    cli_ws.root.joinpath(name).write_text(
+        f"# {name}" if content is None else content, encoding="utf-8"
+    )
+
+
+def _complete_cli(cli_conn, cli_ws, *, outcome=None, artifacts=()):
+    """Complete the current Run through ``main``; return the exit code."""
+    args = ["complete-run"]
+    if outcome is not None:
+        args += ["--outcome", outcome]
+    for name, type_ in artifacts:
+        _write_artifact_file(cli_ws, name)
+        args += ["--artifact", f"{name}:{type_}:{name}"]
+    return main(args)
+
+
+def _drive_cli_to_review(cli_conn, cli_ws, task):
+    """Resolve + complete requirements/decomposition/implementation via CLI."""
+    steps = (("requirements.md", "requirements"), ("plan.md", "plan"), ())
+    for sub in steps:
+        assert main(["resolve-task", task.id]) == 0
+        subs = (sub,) if sub else ()
+        assert _complete_cli(cli_conn, cli_ws, outcome="ready", artifacts=subs) == 0
+    assert main(["resolve-task", task.id]) == 0
+    return store.list_runs_for_task(cli_conn, task.id)[-1]
+
+
+def test_complete_run_vertical_slice(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    assert main(["prepare-artifacts"]) == 0
+    capsys.readouterr()
+
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out = captured.out
+    assert f"Run {run.id} completed." in out
+    assert "Next action:" in out
+    assert "Run decomposition." in out
+    assert f"/skillflow:resolve-task {task.id}" in out
+    done = store.get_run(cli_conn, run.id)
+    assert done.status is RunStatus.COMPLETED
+    assert done.completed_at is not None
+    result = store.get_result_for_run(cli_conn, run.id)
+    assert result is not None
+    assert result.status is ResultStatus.COMPLETED
+    assert (result.outcome.type, result.outcome.decision) == (
+        "requirements",
+        "ready",
+    )
+    registered = store.list_artifacts_for_run(cli_conn, run.id)
+    assert [(a.name, a.type, a.version) for a in registered] == [
+        ("requirements.md", "requirements", 1)
+    ]
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == 1
+
+
+def test_complete_run_review_approved_completes_task(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    review = _drive_cli_to_review(cli_conn, cli_ws, task)
+    capsys.readouterr()
+
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="approved",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert f"Run {review.id} completed." in out
+    assert "Task status:" in out
+    assert "completed" in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.COMPLETED
+    assert main(["resolve-task", task.id]) == 1
+
+
+def test_complete_run_changes_requested_points_at_implementation(
+    cli_conn, cli_ws, capsys
+):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    capsys.readouterr()
+
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="changes_requested",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "Run implementation." in out
+    assert f"/skillflow:resolve-task {task.id}" in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    # The reported pointer works: the next Run starts in a new resolution.
+    assert main(["resolve-task", task.id]) == 0
+
+
+def test_complete_run_human_required_parks_task(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    capsys.readouterr()
+
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="human_required",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "Human decision required." in out
+    assert "/skillflow:decide <decision>" in out
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.WAITING_FOR_HUMAN
+    capsys.readouterr()
+    assert main(["resolve-task", task.id]) == 1
+    assert "waiting_for_human" in capsys.readouterr().err
+
+
+def test_complete_run_without_running_run_exits_one(cli_conn, capsys):
+    _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["complete-run", "--outcome", "ready"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "resolve-task" in captured.err
+
+
+def test_complete_run_two_running_runs_reject_without_task(cli_conn, capsys):
+    task_a, _ = _resolve_cli_task(cli_conn, title="First")
+    task_b, _ = _resolve_cli_task(cli_conn, title="Second")
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "ready"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert task_a.id in captured.err
+    assert task_b.id in captured.err
+    assert "--task" in captured.err
+
+
+def test_complete_run_task_selects_the_named_task(cli_conn, cli_ws, capsys):
+    _, run_a = _resolve_cli_task(cli_conn, title="First")
+    task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
+    _write_artifact_file(cli_ws, "requirements.md")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--task",
+                task_b.id,
+                "--outcome",
+                "ready",
+                "--artifact",
+                "requirements.md:requirements:requirements.md",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert run_b.id in out
+    assert run_a.id not in out
+    assert store.get_run(cli_conn, run_a.id).status is RunStatus.RUNNING
+    assert store.get_run(cli_conn, run_b.id).status is RunStatus.COMPLETED
+
+
+def test_complete_run_unknown_task_exits_one(cli_conn, capsys):
+    assert main(["complete-run", "--task", "task-nope"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "task-nope" in captured.err
+
+
+def test_complete_run_task_without_runs_exits_one(cli_conn, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["complete-run", "--task", task.id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "has no Runs" in captured.err
+
+
+def test_complete_run_task_without_running_run_exits_one(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    result_before = store.get_result_for_run(cli_conn, run.id)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--task", task.id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert run.id in captured.err
+    assert "completed" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.COMPLETED
+    assert store.get_result_for_run(cli_conn, run.id) == result_before
+
+
+def test_complete_run_missing_artifact_leaves_run_running(cli_conn, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "ready"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "requirements" in captured.err
+    assert "/skillflow:prepare-artifacts" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert store.list_artifacts_for_run(cli_conn, run.id) == []
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == 1
+
+
+def test_complete_run_registered_output_needs_no_resubmission(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    create_artifact(
+        cli_conn,
+        cli_ws,
+        run_id=run.id,
+        name="requirements.md",
+        type="requirements",
+        content="the requirements",
+    )
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "ready"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"Run {run.id} completed." in out
+    assert "Run decomposition." in out
+
+
+def test_complete_run_missing_outcome_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "requirements.md")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--artifact",
+                "requirements.md:requirements:requirements.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "requires a lifecycle outcome" in captured.err
+    assert "'ready'" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert store.list_artifacts_for_run(cli_conn, run.id) == []
+
+
+def test_complete_run_invalid_outcome_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "requirements.md")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "maybe",
+                "--artifact",
+                "requirements.md:requirements:requirements.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "has no outcome 'maybe'" in captured.err
+    assert "accepted: ['ready']" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert store.list_artifacts_for_run(cli_conn, run.id) == []
+
+
+def test_complete_run_blank_outcome_rejected(cli_conn, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "  "]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty --outcome" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_complete_run_second_completion_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    result_before = store.get_result_for_run(cli_conn, run.id)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "ready"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "resolve-task" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.COMPLETED
+    assert store.get_result_for_run(cli_conn, run.id) == result_before
+
+
+def test_complete_run_missing_file_rejected(cli_conn, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "requirements.md:requirements:does-not-exist.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "does-not-exist.md" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_complete_run_directory_as_file_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    cli_ws.root.joinpath("subdir").mkdir()
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "requirements.md:requirements:subdir",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "subdir" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_complete_run_non_utf8_file_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    cli_ws.root.joinpath("blob.md").write_bytes(b"\xff\xfe\x00bad")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "requirements.md:requirements:blob.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not valid UTF-8" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+@pytest.mark.parametrize(
+    "spec", ["justname", "name:type", "name:type:", ":type:path", "name::path", ""]
+)
+def test_complete_run_malformed_spec_rejected(cli_conn, capsys, spec):
+    _, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--artifact", spec]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "NAME:TYPE:PATH" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_complete_run_artifact_spec_tolerates_surrounding_whitespace(
+    cli_conn, cli_ws, capsys
+):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "requirements.md")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "  requirements.md : requirements : requirements.md  ",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert f"Run {run.id} completed." in out
+    assert store.get_run(cli_conn, run.id).status is RunStatus.COMPLETED
+
+
+def test_complete_run_artifact_accepts_absolute_path(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "requirements.md")
+    absolute = str(cli_ws.root.joinpath("requirements.md"))
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                f"requirements.md:requirements:{absolute}",
+            ]
+        )
+        == 0
+    )
+
+    assert store.get_run(cli_conn, run.id).status is RunStatus.COMPLETED
+
+
+def test_complete_run_extra_colon_belongs_to_path(cli_conn, cli_ws, capsys):
+    # maxsplit=2: "requirements.md:extra" is the PATH, so this is a file
+    # error naming that path -- not a malformed spec.
+    _, run = _resolve_cli_task(cli_conn)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "requirements.md:requirements:requirements.md:extra",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "requirements.md:extra" in captured.err
+    assert "NAME:TYPE:PATH" not in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+
+
+def test_complete_run_traversal_name_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "evil.md")
+    files_before = sorted(p for p in cli_ws.artifacts_dir.rglob("*") if p.is_file())
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "../escape.md:requirements:evil.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "plain filename" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert sorted(p for p in cli_ws.artifacts_dir.rglob("*") if p.is_file()) == (
+        files_before
+    )
+    assert not cli_ws.root.joinpath("escape.md").exists()
+
+
+def test_complete_run_duplicate_names_rejected(cli_conn, cli_ws, capsys):
+    _, run = _resolve_cli_task(cli_conn)
+    _write_artifact_file(cli_ws, "first.md")
+    _write_artifact_file(cli_ws, "second.md")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "complete-run",
+                "--outcome",
+                "ready",
+                "--artifact",
+                "dup.md:requirements:first.md",
+                "--artifact",
+                "dup.md:requirements:second.md",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "duplicate" in captured.err
+    assert "dup.md" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert store.list_artifacts_for_run(cli_conn, run.id) == []
+
+
+def test_complete_run_contradicting_type_rejected(cli_conn, cli_ws, capsys):
+    task, run = _resolve_cli_task(cli_conn)
+    create_artifact(
+        cli_conn,
+        cli_ws,
+        run_id=run.id,
+        name="plan.md",
+        type="plan",
+        content="the plan",
+    )
+    _write_artifact_file(cli_ws, "plan-new.md")
+    capsys.readouterr()
+
+    # The CLI chain check fires before the service's coverage validation,
+    # so no covering submission is needed to reach it.
+    assert main(["complete-run", "--artifact", "plan.md:requirements:plan-new.md"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "is of type 'plan'" in captured.err
+    assert store.get_run(cli_conn, run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, run.id) is None
+    assert len(store.list_artifacts_for_run(cli_conn, run.id)) == 1
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+
+
+def _seed_skill_targeted_run(cli_conn, cli_ws):
+    """Resolve + complete the first step, then open a skill-targeted Run."""
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    first = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    skill_run = create_run(
+        cli_conn,
+        task_id=task.id,
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="research", skill="research"
+        ),
+        triggered_by_run_id=first.id,
+    )
+    return task, skill_run
+
+
+def test_complete_run_skill_targeted_run_completes(cli_conn, cli_ws, capsys):
+    task, skill_run = _seed_skill_targeted_run(cli_conn, cli_ws)
+    runs_before = len(store.list_runs_for_task(cli_conn, task.id))
+    capsys.readouterr()
+
+    assert main(["complete-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"Run {skill_run.id} completed." in out
+    assert "No lifecycle action applies" in out
+    assert "active" in out
+    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.COMPLETED
+    assert store.get_result_for_run(cli_conn, skill_run.id) is not None
+    assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == runs_before
+
+
+def test_complete_run_skill_targeted_run_rejects_outcome(cli_conn, cli_ws, capsys):
+    _, skill_run = _seed_skill_targeted_run(cli_conn, cli_ws)
+    capsys.readouterr()
+
+    assert main(["complete-run", "--outcome", "ready"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "is not expected" in captured.err
+    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.RUNNING
+    assert store.get_result_for_run(cli_conn, skill_run.id) is None
+
+
+# --- format_completion ------------------------------------------------------
+
+
+def _completion(status=TaskStatus.ACTIVE, action=None):
+    now = datetime.now(UTC)
+    task = Task(
+        id="task-1",
+        title="Ship it",
+        description="",
+        status=status,
+        created_at=now,
+        updated_at=now,
+    )
+    run = Run(
+        id="run-1",
+        task_id=task.id,
+        status=RunStatus.COMPLETED,
+        created_at=now,
+        completed_at=now,
+    )
+    result = Result(
+        id="result-1",
+        run_id=run.id,
+        status=ResultStatus.COMPLETED,
+        created_at=now,
+    )
+    return RunCompletion(run=run, result=result, task=task, action=action)
+
+
+def test_format_completion_run_with_step():
+    completion = _completion(
+        action=EvaluationOutput(
+            action=ActionType.RUN, reason="ready", step="decomposition"
+        )
+    )
+
+    assert format_completion(completion) == (
+        "Run run-1 completed.\n"
+        "\n"
+        "Next action:\n"
+        "Run decomposition.\n"
+        "\n"
+        "Start the next Run in a new Claude Code session:\n"
+        "\n"
+        "/skillflow:resolve-task task-1"
+    )
+
+
+def test_format_completion_run_with_skill_has_no_resolve_pointer():
+    completion = _completion(
+        action=EvaluationOutput(
+            action=ActionType.RUN,
+            reason="fundamental_assumption_wrong",
+            skill="research",
+        )
+    )
+
+    rendered = format_completion(completion)
+
+    assert rendered == (
+        "Run run-1 completed.\n"
+        "\n"
+        "Next action:\n"
+        "Run skill 'research' (reason: fundamental_assumption_wrong).\n"
+        "\n"
+        "Task status:\n"
+        "active"
+    )
+    # resolve-task rejects skill-only actions, so the formatter must not
+    # print a pointer that would fail.
+    assert "/skillflow:resolve-task" not in rendered
+
+
+def test_format_completion_human():
+    completion = _completion(
+        action=EvaluationOutput(action=ActionType.HUMAN, reason="human_required")
+    )
+
+    assert format_completion(completion) == (
+        "Run run-1 completed.\n"
+        "\n"
+        "Next action:\n"
+        "Human decision required.\n"
+        "\n"
+        "Use:\n"
+        "\n"
+        "/skillflow:decide <decision>"
+    )
+
+
+def test_format_completion_complete():
+    completion = _completion(
+        status=TaskStatus.COMPLETED,
+        action=EvaluationOutput(action=ActionType.COMPLETE, reason="approved"),
+    )
+
+    assert format_completion(completion) == (
+        "Run run-1 completed.\n\nTask status:\ncompleted"
+    )
+
+
+def test_format_completion_cancel():
+    completion = _completion(
+        status=TaskStatus.CANCELLED,
+        action=EvaluationOutput(action=ActionType.CANCEL, reason="abort"),
+    )
+
+    assert format_completion(completion) == (
+        "Run run-1 completed.\n\nTask status:\ncancelled"
+    )
+
+
+def test_format_completion_without_action():
+    completion = _completion(action=None)
+
+    assert format_completion(completion) == (
+        "Run run-1 completed.\n"
+        "\n"
+        "No lifecycle action applies to this Run (no workflow step).\n"
+        "\n"
+        "Task status:\n"
+        "active"
+    )
