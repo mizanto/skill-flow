@@ -60,7 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
         "resolve-task",
         help="Resolve a Task into a new running Run and print its RunInput.",
     )
-    resolve_parser.add_argument("task_id", help="The Task to resolve.")
+    resolve_parser.add_argument(
+        "task_id",
+        nargs="?",
+        default=None,
+        help="The Task to resolve (default: the workspace's single active or "
+        "waiting Task).",
+    )
     resolve_parser.add_argument(
         "--workflow",
         default=None,
@@ -808,7 +814,7 @@ def _load_diagnostics(
         ) from None
 
 
-def _run_resolve_task(*, task_id: str, workflow: str | None) -> int:
+def _run_resolve_task(*, task_id: str | None, workflow: str | None) -> int:
     """Execute ``resolve-task``; return a process exit code."""
     try:
         ws = workspace.Workspace(root=workspace.find_repo_root())

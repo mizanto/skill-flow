@@ -207,10 +207,12 @@ skillflow resolve-task "$TASK"
 
 A completed Task rejects further resolves: the lifecycle is over.
 
-When several Runs are `running` in one workspace (several active
-Tasks), the current-Run commands need `--task <task-id>` to
-disambiguate: `prepare-artifacts`, `complete-run`, `fail-run`, and
-`decide` (which needs it when several Tasks wait) all accept it.
+A workspace has at most one `running` Run: `resolve-task` refuses with
+`ActiveRunExists` while any Task's Run is running. With the Task id
+omitted, `resolve-task` uses the single active or waiting Task
+(`AmbiguousCurrentTask` when there are several). `prepare-artifacts`,
+`complete-run`, `fail-run`, and `decide` (which needs it when several
+Tasks wait) still accept `--task <task-id>` to disambiguate.
 
 ## 6. Human decisions
 

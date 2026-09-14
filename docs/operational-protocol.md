@@ -64,7 +64,7 @@ SF-A-6 SF-030).
 
 | Skill command | Runtime operation | Implementation |
 |---|---|---|
-| `/skillflow:resolve-task <task-id>` | `skillflow resolve-task <task_id> [--workflow <id>]` | [`cli.py`](../src/skillflow/cli.py) `_run_resolve_task`, [`resolve_task.py`](../src/skillflow/resolve_task.py) |
+| `/skillflow:resolve-task <task-id>` | `skillflow resolve-task [<task_id>] [--workflow <id>]` | [`cli.py`](../src/skillflow/cli.py) `_run_resolve_task`, [`resolve_task.py`](../src/skillflow/resolve_task.py) |
 | `/skillflow:prepare-artifacts` | `skillflow prepare-artifacts [--task <task-id>]` | [`cli.py`](../src/skillflow/cli.py) `_run_prepare_artifacts`, [`prepare_artifacts.py`](../src/skillflow/prepare_artifacts.py) |
 | `/skillflow:complete-run` | `skillflow complete-run [--task <task-id>] [--outcome <d>] [--artifact N:T:P ...]` | [`cli.py`](../src/skillflow/cli.py) `_run_complete_run`, [`complete_run.py`](../src/skillflow/complete_run.py) |
 | `/skillflow:decide <decision>` | `skillflow decide <decision> [--task <task-id>] [--comment <text>]` | [`cli.py`](../src/skillflow/cli.py) `_run_decide`, [`decide.py`](../src/skillflow/decide.py) |
@@ -85,8 +85,8 @@ Claude Code session, before any lifecycle work (SF-A-5 §4, SF-A-3 §2).
 - On `HumanDecisionRequired`: the Task waits for a human — stop and
   report that `/skillflow:decide` is needed (rule 4); do not work
   around it.
-- On `ActiveRunExists`: a Run is already `running` for this Task —
-  do not resolve again (SF-A-5 §3.1).
+- On `ActiveRunExists`: a Run is already `running` in this workspace
+  (possibly for another Task) — do not resolve again (SF-A-7 I11).
 
 ## Rule 2 — One Run per session
 
@@ -317,10 +317,11 @@ was created, or no Result was created and no Run status changed.
 
 | Code | Meaning | Recovery |
 |---|---|---|
-| `TaskNotFound` | No Task with that id | Check the id |
+| `TaskNotFound` | No Task with that id, or (id omitted) no active/waiting Task | Check the id, or create a Task |
+| `AmbiguousCurrentTask` | Id omitted, several active/waiting Tasks | Re-run with the Task id |
 | `TaskAlreadyCompleted` / `TaskCancelled` | Task is terminal | Nothing to run |
 | `HumanDecisionRequired` | Task waits for human | Use `/skillflow:decide` |
-| `ActiveRunExists` | A Run is already `running` | Do not resolve again |
+| `ActiveRunExists` | A Run is already `running` in this workspace | Do not resolve again |
 | `WorkflowSelectionRequired` | Task has no Workflow | Ask the user, re-run with `--workflow <id>` |
 | `WorkflowMismatch` / `NoLifecycleAction` / `RunNotCompleted` / `ResultMissing` / `StepUnresolved` | History/workflow inconsistent with a new Run | Escalate; do not invent a step |
 

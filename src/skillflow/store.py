@@ -805,8 +805,9 @@ def list_running_runs(conn: sqlite3.Connection) -> list[Run]:
     is invoked with no Task id (SF-A-5 §5.1), and ``complete-run`` will need
     the same query (SF-A-5 §6.2), so the current Run is found by status.
     ``runs_one_running_per_task`` bounds this to
-    one row per Task, not one row overall -- a workspace with two active Tasks
-    legitimately returns two, and disambiguating is the caller's job.
+    one row per Task, not one row overall -- more than one row is possible
+    only in a pre-SF-43 workspace or the accepted concurrent double-resolve
+    race, and disambiguating is the caller's job.
     """
     rows = conn.execute(
         "SELECT * FROM runs WHERE status = ? ORDER BY created_at, id",

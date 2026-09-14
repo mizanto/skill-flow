@@ -32,6 +32,7 @@ from skillflow.evaluator import (
     EvaluationError,
     EvaluationOutput,
     WorkflowSelectionRequiredError,
+    resolve_initial_action,
 )
 from skillflow.fail_run import RunFailure
 from skillflow.outputs import OutputCheck, OutputValidation
@@ -110,10 +111,55 @@ def _seed_task(cli_conn, *, title="Ship it", description="", workflow_id=None):
     )
 
 
-def test_resolve_task_without_id_exits_two():
-    with pytest.raises(SystemExit) as exc_info:
-        main(["resolve-task"])
-    assert exc_info.value.code == 2
+def test_resolve_task_without_id_resolves_the_single_task(cli_conn, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["resolve-task"]) == 0
+
+    captured = capsys.readouterr()
+    assert task.id in captured.out
+    assert captured.err == ""
+    assert len(store.list_runs_for_task(cli_conn, task.id)) == 1
+
+
+def test_resolve_task_without_id_and_no_task_exits_one(cli_conn, capsys):
+    assert main(["resolve-task"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow resolve-task: TaskNotFound: ")
+    assert "skillflow start" in captured.err
+    assert lines[-1] == "No Run was created."
+
+
+def test_resolve_task_without_id_and_several_tasks_is_ambiguous(cli_conn, capsys):
+    first = _seed_task(cli_conn, title="First", workflow_id="software-change")
+    second = _seed_task(cli_conn, title="Second", workflow_id="software-change")
+
+    assert main(["resolve-task"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("skillflow resolve-task: AmbiguousCurrentTask: ")
+    assert first.id in captured.err
+    assert second.id in captured.err
+    assert cli_conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_resolve_task_rejects_while_another_tasks_run_is_running(cli_conn, capsys):
+    task_a, run_a = _resolve_cli_task(cli_conn, title="First")
+    task_b = _seed_task(cli_conn, title="Second", workflow_id="software-change")
+    capsys.readouterr()
+
+    assert main(["resolve-task", task_b.id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("skillflow resolve-task: ActiveRunExists: ")
+    assert task_a.id in captured.err
+    assert run_a.id in captured.err
+    assert store.list_runs_for_task(cli_conn, task_b.id) == []
 
 
 def test_resolve_task_success_prints_run_input(cli_conn, capsys):
@@ -320,6 +366,20 @@ def _resolve_cli_task(cli_conn, **kwargs):
     return task, runs[0]
 
 
+def _seed_parallel_running_run(cli_conn, **kwargs):
+    # A second running Run is unreachable through resolve-task since SF-43
+    # (one running Run per workspace); seed it through the service so the
+    # AmbiguousCurrentRun / --task paths (pre-SF-43 workspaces, the accepted
+    # concurrent race) stay covered.
+    task = _seed_task(cli_conn, workflow_id="software-change", **kwargs)
+    run = create_run(
+        cli_conn,
+        task_id=task.id,
+        action=resolve_initial_action(task, load_workflow(REFERENCE)),
+    )
+    return task, run
+
+
 def test_prepare_artifacts_without_running_run_exits_one(cli_conn, capsys):
     _seed_task(cli_conn, workflow_id="software-change")
 
@@ -386,7 +446,7 @@ def test_prepare_artifacts_all_ready_after_registration(cli_conn, cli_ws, capsys
 
 def test_prepare_artifacts_task_selects_the_named_task(cli_conn, capsys):
     task_a, run_a = _resolve_cli_task(cli_conn, title="First")
-    task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
+    task_b, run_b = _seed_parallel_running_run(cli_conn, title="Second")
     capsys.readouterr()
 
     assert main(["prepare-artifacts", "--task", task_b.id]) == 0
@@ -399,7 +459,7 @@ def test_prepare_artifacts_task_selects_the_named_task(cli_conn, capsys):
 
 def test_prepare_artifacts_two_running_runs_reject_without_task(cli_conn, capsys):
     _resolve_cli_task(cli_conn, title="First")
-    _resolve_cli_task(cli_conn, title="Second")
+    _seed_parallel_running_run(cli_conn, title="Second")
     capsys.readouterr()
 
     assert main(["prepare-artifacts"]) == 1
@@ -735,7 +795,7 @@ def test_complete_run_without_running_run_exits_one(cli_conn, capsys):
 
 def test_complete_run_two_running_runs_reject_without_task(cli_conn, capsys):
     task_a, _ = _resolve_cli_task(cli_conn, title="First")
-    task_b, _ = _resolve_cli_task(cli_conn, title="Second")
+    task_b, _ = _seed_parallel_running_run(cli_conn, title="Second")
     capsys.readouterr()
 
     assert main(["complete-run", "--outcome", "ready"]) == 1
@@ -749,7 +809,7 @@ def test_complete_run_two_running_runs_reject_without_task(cli_conn, capsys):
 
 def test_complete_run_task_selects_the_named_task(cli_conn, cli_ws, capsys):
     _, run_a = _resolve_cli_task(cli_conn, title="First")
-    task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
+    task_b, run_b = _seed_parallel_running_run(cli_conn, title="Second")
     _write_artifact_file(cli_ws, "requirements.md")
     capsys.readouterr()
 
@@ -1838,7 +1898,7 @@ def test_fail_run_blank_message_reports_envelope(cli_conn, capsys):
 
 def test_fail_run_task_selects_the_named_task(cli_conn, cli_ws, capsys):
     task_a, run_a = _resolve_cli_task(cli_conn, title="First")
-    task_b, run_b = _resolve_cli_task(cli_conn, title="Second")
+    task_b, run_b = _seed_parallel_running_run(cli_conn, title="Second")
 
     assert main(["fail-run", "--task", task_a.id, "--message", "boom"]) == 0
 

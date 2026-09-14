@@ -32,11 +32,12 @@ from skillflow.domain import (
     RunStatus,
     TaskStatus,
 )
+from skillflow.evaluator import resolve_initial_action
 from skillflow.outputs import OutputValidation
 from skillflow.prepare_artifacts import ArtifactReport, PrepareArtifactsError
 from skillflow.prepare_artifacts import prepare_artifacts as prepare
 from skillflow.resolve_task import resolve_task as resolve
-from skillflow.service import create_task, register_workflow
+from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow_loader import WorkflowLoadError, load_workflow
 
 REFERENCE = (
@@ -217,9 +218,13 @@ def test_single_running_run_resolves(conn, ws, workflows):
 
 def test_two_running_runs_reject_as_ambiguous(conn, ws, workflows):
     _, task_a = _assigned(conn, title="First")
-    _, task_b = _assigned(conn, title="Second")
+    workflow, task_b = _assigned(conn, title="Second")
     run_a = store.get_run(conn, resolve(conn, ws, task_id=task_a.id).run_id)
-    run_b = store.get_run(conn, resolve(conn, ws, task_id=task_b.id).run_id)
+    # A second running Run is unreachable through resolve-task since SF-43;
+    # seeded through the service to keep the AmbiguousCurrentRun path covered.
+    run_b = create_run(
+        conn, task_id=task_b.id, action=resolve_initial_action(task_b, workflow)
+    )
     with pytest.raises(PrepareArtifactsError) as exc_info:
         prepare(conn, ws)
     assert exc_info.value.code == "AmbiguousCurrentRun"
@@ -231,9 +236,13 @@ def test_two_running_runs_reject_as_ambiguous(conn, ws, workflows):
 
 def test_task_disambiguator_selects_the_named_task(conn, ws, workflows):
     _, task_a = _assigned(conn, title="First")
-    _, task_b = _assigned(conn, title="Second")
+    workflow, task_b = _assigned(conn, title="Second")
     run_a_id = resolve(conn, ws, task_id=task_a.id).run_id
-    run_b_id = resolve(conn, ws, task_id=task_b.id).run_id
+    # A second running Run is unreachable through resolve-task since SF-43;
+    # seeded through the service to keep the AmbiguousCurrentRun path covered.
+    run_b_id = create_run(
+        conn, task_id=task_b.id, action=resolve_initial_action(task_b, workflow)
+    ).id
     report = prepare(conn, ws, task_id=task_b.id)
     assert (report.task_id, report.run_id) == (task_b.id, run_b_id)
     other = prepare(conn, ws, task_id=task_a.id)

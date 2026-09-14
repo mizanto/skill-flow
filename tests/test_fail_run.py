@@ -48,6 +48,7 @@ from skillflow.domain import (
 from skillflow.evaluator import (
     EvaluationError,
     EvaluationOutput,
+    resolve_initial_action,
 )
 from skillflow.fail_run import FailRunError, FailureRequest, RunFailure
 from skillflow.fail_run import fail_run as fail
@@ -414,9 +415,13 @@ def test_no_running_run_in_workspace_rejected(conn, ws, workflows):
 
 def test_ambiguous_running_runs_rejected(conn, ws, workflows):
     _, first = _assigned(conn, title="First")
-    _, second = _assigned(conn, title="Second")
+    workflow, second = _assigned(conn, title="Second")
     first_run = resolve(conn, ws, task_id=first.id).run_id
-    second_run = resolve(conn, ws, task_id=second.id).run_id
+    # A second running Run is unreachable through resolve-task since SF-43;
+    # seeded through the service to keep the AmbiguousCurrentRun path covered.
+    second_run = create_run(
+        conn, task_id=second.id, action=resolve_initial_action(second, workflow)
+    ).id
     before = _counts(conn)
     with pytest.raises(FailRunError) as exc_info:
         fail(conn, ws, request=FailureRequest(diagnostics="boom"))

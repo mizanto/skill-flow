@@ -6,11 +6,17 @@ Claude Code session needs (SF-A-5 §4). One pipeline, executed in order --
 the order is the contract, because it fixes error precedence:
 
 ```text
-1  load Task ................... missing -> TaskNotFound
+1  resolve Task (SF-43)
+     task_id None -> active + waiting_for_human Tasks, by (created_at, id)
+                       0 rows  -> TaskNotFound (hint: `skillflow start`)
+                       >1 rows -> AmbiguousCurrentTask (names each task id)
+                       1 row   -> that Task
+     task_id given -> get_task ...... missing -> TaskNotFound
 2  Task status ................ completed/cancelled -> TaskAlreadyCompleted /
                                                       TaskCancelled
                                  waiting_for_human -> HumanDecisionRequired
-3  Run history (one query) .... a running Run -> ActiveRunExists
+3  workspace running Runs ..... any running Run (of ANY Task) -> ActiveRunExists
+                                 (SF-A-7 I11: one running Run per workspace)
 4  Workflow selection ......... unassigned + no --workflow
                                                     -> WorkflowSelectionRequired
                                  --workflow given -> register + assign
@@ -65,7 +71,9 @@ from skillflow.store import (
     list_artifacts_for_task,
     list_human_decisions_for_task,
     list_lifecycle_events_for_task,
+    list_running_runs,
     list_runs_for_task,
+    list_tasks_by_status,
 )
 from skillflow.workflow import ActionType
 from skillflow.workflow_loader import list_definition_ids, load_definition
@@ -82,6 +90,7 @@ class ResolveTaskError(Exception):
     carries SF-A-5 §4.3's identifiers verbatim (``"TaskNotFound"``,
     ``"TaskAlreadyCompleted"``, ``"TaskCancelled"``,
     ``"HumanDecisionRequired"``, ``"ActiveRunExists"``, plus
+    ``"AmbiguousCurrentTask"`` (the omitted-id form, SF-43),
     ``"WorkflowMismatch"``, ``"NoLifecycleAction"``, ``"RunNotCompleted"``,
     ``"ResultMissing"`` and ``"StepUnresolved"`` -- the last for a failed
     skill-targeted Run whose ``run.created`` payload names no skill to
@@ -100,12 +109,13 @@ def resolve_task(
     conn: sqlite3.Connection,
     workspace: Workspace,
     *,
-    task_id: str,
+    task_id: str | None = None,
     workflow: str | None = None,
 ) -> RunInput:
     """Resolve ``task_id`` into a new ``running`` Run and return its ``RunInput``.
 
-    Implements the pipeline in the module docstring verbatim. ``workflow``
+    Implements the pipeline in the module docstring verbatim. ``task_id``
+    ``None`` selects the workspace's single non-terminal Task (SF-43). ``workflow``
     is the explicit ``--workflow`` selection: it is only ever assigned,
     never inferred, and loading it happens before any write so a typo
     fails cleanly. Raises :class:`ResolveTaskError` (with ``code``) for
@@ -113,13 +123,35 @@ def resolve_task(
     ``WorkflowLoadError``, ``EvaluationError`` and the service/store errors
     propagate unchanged.
     """
-    task = get_task(conn, task_id)
-    if task is None:
-        raise ResolveTaskError(
-            "TaskNotFound",
-            f"no task with id {task_id!r}; check the id, then run "
-            "`skillflow resolve-task <task-id>` again",
+    if task_id is None:
+        candidates = sorted(
+            list_tasks_by_status(conn, TaskStatus.ACTIVE)
+            + list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN),
+            key=lambda candidate: (candidate.created_at, candidate.id),
         )
+        if not candidates:
+            raise ResolveTaskError(
+                "TaskNotFound",
+                "no active or waiting_for_human Task in this workspace; "
+                "create one with `skillflow start`, then run "
+                "`skillflow resolve-task`",
+            )
+        if len(candidates) > 1:
+            ids = ", ".join(repr(candidate.id) for candidate in candidates)
+            raise ResolveTaskError(
+                "AmbiguousCurrentTask",
+                f"more than one non-terminal Task in this workspace ({ids}); "
+                "re-run as `skillflow resolve-task <task-id>`",
+            )
+        task = candidates[0]
+    else:
+        task = get_task(conn, task_id)
+        if task is None:
+            raise ResolveTaskError(
+                "TaskNotFound",
+                f"no task with id {task_id!r}; check the id, then run "
+                "`skillflow resolve-task <task-id>` again",
+            )
 
     if task.status is TaskStatus.COMPLETED:
         raise ResolveTaskError(
@@ -141,14 +173,19 @@ def resolve_task(
             f"`skillflow resolve-task {task.id}`",
         )
 
-    runs = list_runs_for_task(conn, task.id)
-    running = next((r for r in runs if r.status is RunStatus.RUNNING), None)
-    if running is not None:
+    # Workspace-wide (SF-43): a running Run of ANY Task blocks resolution.
+    # This subsumes the former per-Task check. Several rows are possible only
+    # in a pre-SF-43 workspace or the accepted concurrent race; the oldest
+    # is named.
+    running = list_running_runs(conn)
+    if running:
         raise ResolveTaskError(
             "ActiveRunExists",
-            f"task {task.id!r} already has running run {running.id!r}; finish "
-            "it with `skillflow complete-run` before resolving another Run",
+            f"run {running[0].id!r} of task {running[0].task_id!r} is already "
+            "running in this workspace; finish it with "
+            "`skillflow complete-run` before resolving another Run",
         )
+    runs = list_runs_for_task(conn, task.id)
 
     if task.workflow_definition_id is None and workflow is None:
         available = list_definition_ids(workspace.workflows_dir)

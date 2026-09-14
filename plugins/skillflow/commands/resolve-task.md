@@ -52,8 +52,8 @@ anything under `.skillflow/`.
   appended. The runtime never infers the Workflow.
 - `HumanDecisionRequired`: the Task is `waiting_for_human`. Stop: report that
   `/skillflow:decide` is needed and do no Task work.
-- `ActiveRunExists`: a Run is already `running` for this Task. Do not resolve
-  again.
+- `ActiveRunExists`: a Run is already `running` in this workspace (possibly
+  for another Task). Do not resolve again; report which Run must finish first.
 - `TaskNotFound`: check the Task id.
 - `TaskAlreadyCompleted` / `TaskCancelled`: the Task is terminal; there is
   nothing to run.

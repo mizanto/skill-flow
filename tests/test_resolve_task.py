@@ -426,6 +426,156 @@ def test_second_resolution_reports_active_run(conn, ws, workflows):
     assert len(store.list_runs_for_task(conn, task.id)) == 1
 
 
+# --- workspace scope (SF-43) ----------------------------------------------
+
+
+def _rows(conn):
+    """Snapshot every table ``resolve-task`` could write, for no-write checks."""
+    return {
+        table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")]
+        for table in ("tasks", "runs", "lifecycle_events", "workflow_definitions")
+    }
+
+
+def test_running_run_of_another_task_is_rejected_without_writes(conn, ws, workflows):
+    _, task_a = _assigned(conn, title="First")
+    run_a_id = resolve(conn, ws, task_id=task_a.id).run_id
+    _, task_b = _assigned(conn, title="Second")
+    before = _rows(conn)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task_b.id)
+    assert exc_info.value.code == "ActiveRunExists"
+    message = str(exc_info.value)
+    assert task_a.id in message and run_a_id in message
+    assert _rows(conn) == before
+
+
+@pytest.mark.parametrize("finish", ["completed", "failed"])
+def test_other_task_resolves_after_running_run_finishes(conn, ws, workflows, finish):
+    _, task_a = _assigned(conn, title="First")
+    run_a = store.get_run(conn, resolve(conn, ws, task_id=task_a.id).run_id)
+    if finish == "completed":
+        _result(conn, _complete(conn, run_a), decision="ready")
+    else:
+        _failed_result(conn, _fail(conn, run_a))
+    _, task_b = _assigned(conn, title="Second")
+    run_input = resolve(conn, ws, task_id=task_b.id)
+    assert run_input.task_id == task_b.id
+    assert [r.id for r in store.list_running_runs(conn)] == [run_input.run_id]
+
+
+def test_workflow_selection_is_not_persisted_while_another_run_is_running(
+    conn, ws, workflows
+):
+    _, task_a = _assigned(conn, title="First")
+    resolve(conn, ws, task_id=task_a.id)
+    task_b = create_task(conn, title="Unassigned")
+    before = _rows(conn)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task_b.id, workflow="software-change")
+    assert exc_info.value.code == "ActiveRunExists"
+    assert store.get_task(conn, task_b.id).workflow_definition_id is None
+    assert _rows(conn) == before
+
+
+def test_terminal_task_status_precedes_another_tasks_running_run(conn, ws, workflows):
+    _, task_a = _assigned(conn, title="First")
+    resolve(conn, ws, task_id=task_a.id)
+    _, task_b = _assigned(conn, title="Second")
+    _set_status(conn, task_b, TaskStatus.COMPLETED)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task_b.id)
+    assert exc_info.value.code == "TaskAlreadyCompleted"
+
+
+def test_omitted_task_id_resolves_the_single_non_terminal_task(conn, ws, workflows):
+    _, done = _assigned(conn, title="Done")
+    _set_status(conn, done, TaskStatus.COMPLETED)
+    _, dropped = _assigned(conn, title="Dropped")
+    _set_status(conn, dropped, TaskStatus.CANCELLED)
+    _, task = _assigned(conn, title="Current")
+    run_input = resolve(conn, ws)
+    assert run_input.task_id == task.id
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+    assert len(_runs(conn)) == 1
+
+
+def test_omitted_task_id_selects_a_single_waiting_task(conn, ws, workflows):
+    _, done = _assigned(conn, title="Done")
+    _set_status(conn, done, TaskStatus.COMPLETED)
+    _, task = _assigned(conn, title="Waiting")
+    _set_status(conn, task, TaskStatus.WAITING_FOR_HUMAN)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws)
+    assert exc_info.value.code == "HumanDecisionRequired"
+    assert task.id in str(exc_info.value)
+    assert _runs(conn) == []
+
+
+def test_omitted_task_id_without_non_terminal_task_rejects_with_task_not_found(
+    conn, ws, workflows
+):
+    _, done = _assigned(conn, title="Done")
+    _set_status(conn, done, TaskStatus.COMPLETED)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws)
+    assert exc_info.value.code == "TaskNotFound"
+    assert "skillflow start" in str(exc_info.value)
+    assert _runs(conn) == []
+
+
+def test_omitted_task_id_with_several_non_terminal_tasks_is_ambiguous(
+    conn, ws, workflows
+):
+    _, active = _assigned(conn, title="Active")
+    _, waiting = _assigned(conn, title="Waiting")
+    _set_status(conn, waiting, TaskStatus.WAITING_FOR_HUMAN)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws)
+    assert exc_info.value.code == "AmbiguousCurrentTask"
+    message = str(exc_info.value)
+    assert active.id in message and waiting.id in message
+    assert _runs(conn) == []
+
+
+def test_omitted_task_id_with_a_running_run_reports_active_run(conn, ws, workflows):
+    _, task = _assigned(conn)
+    first = resolve(conn, ws)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws)
+    assert exc_info.value.code == "ActiveRunExists"
+    assert first.run_id in str(exc_info.value)
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
+def test_omitted_task_id_with_workflow_assigns_and_resolves(conn, ws, workflows):
+    task = create_task(conn, title="Unassigned")
+    run_input = resolve(conn, ws, workflow="software-change")
+    assert run_input.task_id == task.id
+    assert store.get_task(conn, task.id).workflow_definition_id == "software-change"
+    assert len(store.list_runs_for_task(conn, task.id)) == 1
+
+
+def test_workspace_with_two_running_runs_names_the_oldest(conn, ws, workflows):
+    _, task_a = _assigned(conn, title="First")
+    resolve(conn, ws, task_id=task_a.id)
+    workflow_b, task_b = _assigned(conn, title="Second")
+    # A second running Run is unreachable through resolve-task since SF-43;
+    # seeded through the service to simulate a pre-SF-43 workspace (or the
+    # accepted concurrent race).
+    create_run(
+        conn, task_id=task_b.id, action=resolve_initial_action(task_b, workflow_b)
+    )
+    _, task_c = _assigned(conn, title="Third")
+    running = store.list_running_runs(conn)
+    assert len(running) == 2
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task_c.id)
+    assert exc_info.value.code == "ActiveRunExists"
+    message = str(exc_info.value)
+    assert running[0].id in message and running[0].task_id in message
+
+
 # --- subsequent resolution ------------------------------------------------
 
 
