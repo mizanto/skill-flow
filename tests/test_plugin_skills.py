@@ -10,9 +10,9 @@ step; the exact assignment render line first; outcomes and artifact types drawn
 from the step's declarations; model/effort equal to the step's; no verbose
 command invocation and no lifecycle business logic in skill prose.
 
-The tests are parametrized over the discovered skill directories so SF-48 can
-add skills without rewriting this file (it adds the reverse check -- every
-workflow step has a skill directory).
+The tests are parametrized over the discovered skill directories so new
+skills are covered without rewriting this file, plus the SF-48 reverse
+check -- every workflow step has a skill directory.
 
 ``work/`` is the driver skill (SF-47), not an Execution Skill: it orchestrates
 Runs in-session instead of performing one step. It is excluded from the
@@ -295,6 +295,22 @@ def test_skill_is_brief(dirname):
     ), f"{dirname}: skill exceeds {MAX_SKILL_LINES} lines"
 
 
+def test_every_workflow_step_has_skill_dir():
+    workflow = load_workflow(REFERENCE)
+    missing = []
+    for step in workflow.steps:
+        assert step.skill.startswith("skillflow:"), (
+            f"step {step.id!r} uses a non-skillflow skill {step.skill!r}"
+        )
+        dirname = step.skill.removeprefix("skillflow:")
+        if not (SKILLS_DIR / dirname / "SKILL.md").is_file():
+            missing.append(step.skill)
+    assert not missing, (
+        f"workflow steps with no skill directory: {missing} "
+        f"(expected plugins/skillflow/skills/<dir>/SKILL.md)"
+    )
+
+
 def test_research_pins():
     _, _, text = _read_skill("research")
     submissions = _artifact_submissions(text)
@@ -312,6 +328,77 @@ def test_research_pins():
     ), "research skill must fail its Run explicitly when it cannot complete"
     assert "FAILED:" in text, "research skill must report failure as `FAILED: <why>`"
     assert "5 lines" in text, "research skill must bound its reply length"
+
+
+def test_decomposition_pins():
+    _, _, text = _read_skill("decomposition")
+    submissions = _artifact_submissions(text)
+    assert ("plan.md", "plan") in [
+        (name, type_) for name, type_, _ in submissions
+    ], "decomposition skill must submit fixed artifact plan.md of type plan"
+    assert any(
+        path.startswith(".skillflow/runs/") for _, _, path in submissions if path
+    ), "plan artifact must be written under .skillflow/runs/<run-id>/"
+    assert {"ready"} == set(
+        _outcome_tokens(text)
+    ), "decomposition skill must complete with exactly the ready outcome"
+    assert (
+        "skillflow fail-run --message" in text
+    ), "decomposition skill must fail its Run explicitly when it cannot complete"
+    assert "FAILED:" in text, (
+        "decomposition skill must report failure as `FAILED: <why>`"
+    )
+    assert "5 lines" in text, "decomposition skill must bound its reply length"
+
+
+def test_implementation_pins():
+    _, _, text = _read_skill("implementation")
+    assert _artifact_submissions(text) == [], (
+        "implementation skill declares no outputs, so it must submit no artifact"
+    )
+    assert {"ready"} == set(
+        _outcome_tokens(text)
+    ), "implementation skill must complete with exactly the ready outcome"
+    assert "fundamental_assumption_wrong" in text, (
+        "implementation skill must name the stale-review case: a "
+        "fundamental_assumption_wrong review refers to a superseded plan"
+    )
+    assert (
+        "skillflow fail-run --message" in text
+    ), "implementation skill must fail its Run explicitly when it cannot complete"
+    assert "FAILED:" in text, (
+        "implementation skill must report failure as `FAILED: <why>`"
+    )
+    assert "5 lines" in text, "implementation skill must bound its reply length"
+
+
+def test_code_review_pins():
+    _, _, text = _read_skill("code-review")
+    submissions = _artifact_submissions(text)
+    assert ("review.md", "review") in [
+        (name, type_) for name, type_, _ in submissions
+    ], "code-review skill must submit fixed artifact review.md of type review"
+    assert any(
+        path.startswith(".skillflow/runs/") for _, _, path in submissions if path
+    ), "review artifact must be written under .skillflow/runs/<run-id>/"
+    assert {
+        "approved",
+        "changes_requested",
+        "fundamental_assumption_wrong",
+        "human_required",
+    } == set(
+        _outcome_tokens(text)
+    ), "code-review skill must support exactly the four review outcomes"
+    assert "verdict" in text, (
+        "code-review skill must record a verdict with rationale in review.md"
+    )
+    assert (
+        "skillflow fail-run --message" in text
+    ), "code-review skill must fail its Run explicitly when it cannot complete"
+    assert "FAILED:" in text, (
+        "code-review skill must report failure as `FAILED: <why>`"
+    )
+    assert "5 lines" in text, "code-review skill must bound its reply length"
 
 
 def test_work_skill_shipped():
