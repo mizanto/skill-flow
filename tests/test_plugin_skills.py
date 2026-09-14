@@ -1,4 +1,4 @@
-"""Contract tests for the SkillFlow Execution Skills (SF-46).
+"""Contract tests for the SkillFlow Execution Skills (SF-46) and driver (SF-47).
 
 Execution Skills are static: one directory per skill under
 ``plugins/skillflow/skills/``, each with a ``SKILL.md`` that validates its
@@ -13,16 +13,22 @@ command invocation and no lifecycle business logic in skill prose.
 The tests are parametrized over the discovered skill directories so SF-48 can
 add skills without rewriting this file (it adds the reverse check -- every
 workflow step has a skill directory).
+
+``work/`` is the driver skill (SF-47), not an Execution Skill: it orchestrates
+Runs in-session instead of performing one step. It is excluded from the
+execution contract below and covered by the dedicated ``test_work_*`` tests.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
 import pytest
 import yaml
 
+from skillflow.cli import build_parser
 from skillflow.workflow_loader import load_workflow
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "skillflow"
@@ -81,6 +87,52 @@ def _skill_dirs() -> list[str]:
 
 SKILL_DIRS = _skill_dirs()
 
+#: Execution Skills only: ``work/`` is the SF-47 driver and satisfies none of
+#: the per-step contract below (it has no workflow step to map to).
+EXECUTION_SKILL_DIRS = [dirname for dirname in SKILL_DIRS if dirname != "work"]
+
+#: The only CLI operations the driver (SF-47) may invoke: create a Task,
+#: inspect the running Run, or resolve the next Run. Anything else
+#: (``complete-run``, ``fail-run``, ``decide``, ...) belongs to an Execution
+#: Skill or to a later issue (SF-50 owns ``decide``).
+DRIVER_SUBCOMMANDS = frozenset({"start", "assignment", "resolve-task"})
+
+#: The exact frontmatter surface SF-47 prescribes for the driver. A new key
+#: fails loudly here so the addition is a deliberate, reviewed decision. The
+#: driver inherits its model and runs in-session, so it carries none of the
+#: Execution Skill keys (``context``, ``background``, ``model``, ``effort``).
+WORK_FRONTMATTER_KEYS = frozenset(
+    {
+        "description",
+        "user-invocable",
+        "allowed-tools",
+    }
+)
+
+#: The exact tool grant the driver needs: run the CLI, dispatch Execution
+#: Skills, and ask the user which Task to continue. No step-work tools
+#: (Read/Write/Edit) -- the driver never does step work.
+WORK_ALLOWED_TOOLS = frozenset({"Bash(skillflow:*)", "Skill", "AskUserQuestion"})
+
+
+def _parser_subcommands() -> set[str]:
+    """Return the subcommands registered on the skillflow CLI parser."""
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return set(action.choices)
+    raise AssertionError("skillflow parser has no subcommands")
+
+
+def _allowed_tools(frontmatter: dict) -> set[str]:
+    """Normalize the driver's ``allowed-tools`` value into a tool set."""
+    value = frontmatter.get("allowed-tools")
+    if isinstance(value, str):
+        return {part.strip() for part in value.split(",") if part.strip()}
+    assert isinstance(value, list), (
+        f"work: allowed-tools must be a string or a list, got {type(value).__name__}"
+    )
+    return set(value)
+
 
 def _read_skill(dirname: str) -> tuple[dict, list[str], str]:
     """Return ``(frontmatter, body_lines, full_text)`` for a skill file."""
@@ -137,13 +189,13 @@ def test_research_skill_shipped():
     assert SKILL_DIRS, "no skill directories found under plugins/skillflow/skills/"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_skill_maps_to_workflow_step(dirname):
     step = _step_for_skill(f"skillflow:{dirname}")
     assert step.skill == f"skillflow:{dirname}"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_frontmatter_schema(dirname):
     frontmatter, _, _ = _read_skill(dirname)
     assert set(frontmatter) == EXPECTED_FRONTMATTER_KEYS, (
@@ -173,7 +225,7 @@ def test_frontmatter_schema(dirname):
     ), f"{dirname}: description must name its dispatcher"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_assignment_render_line_is_first_body_line(dirname):
     _, body_lines, _ = _read_skill(dirname)
     assert body_lines, f"{dirname}: empty skill body"
@@ -183,7 +235,7 @@ def test_assignment_render_line_is_first_body_line(dirname):
     )
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_outcomes_subset_of_step(dirname):
     _, _, text = _read_skill(dirname)
     step = _step_for_skill(f"skillflow:{dirname}")
@@ -195,7 +247,7 @@ def test_outcomes_subset_of_step(dirname):
     ), f"{dirname}: outcomes {unknown} are not declared by step {step.id!r}"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_artifact_types_match_step_outputs(dirname):
     _, _, text = _read_skill(dirname)
     step = _step_for_skill(f"skillflow:{dirname}")
@@ -213,7 +265,7 @@ def test_artifact_types_match_step_outputs(dirname):
     ), f"{dirname}: required step outputs {sorted(missing)} are never submitted"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_no_verbose_command_or_foreign_subcommand(dirname):
     _, body_lines, text = _read_skill(dirname)
     body = "\n".join(body_lines)
@@ -228,14 +280,14 @@ def test_no_verbose_command_or_foreign_subcommand(dirname):
     )
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_no_lifecycle_logic_markers(dirname):
     _, _, text = _read_skill(dirname)
     present = [marker for marker in LOGIC_MARKERS if marker in text]
     assert not present, f"{dirname}: business-logic markers {present}"
 
 
-@pytest.mark.parametrize("dirname", SKILL_DIRS)
+@pytest.mark.parametrize("dirname", EXECUTION_SKILL_DIRS)
 def test_skill_is_brief(dirname):
     _, _, text = _read_skill(dirname)
     assert (
@@ -260,3 +312,100 @@ def test_research_pins():
     ), "research skill must fail its Run explicitly when it cannot complete"
     assert "FAILED:" in text, "research skill must report failure as `FAILED: <why>`"
     assert "5 lines" in text, "research skill must bound its reply length"
+
+
+def test_work_skill_shipped():
+    assert (
+        SKILLS_DIR / "work" / "SKILL.md"
+    ).is_file(), "SF-47 ships plugins/skillflow/skills/work/SKILL.md"
+
+
+def test_work_frontmatter_schema():
+    frontmatter, _, _ = _read_skill("work")
+    assert set(frontmatter) == WORK_FRONTMATTER_KEYS, (
+        "work: unexpected frontmatter keys "
+        f"{sorted(set(frontmatter) ^ WORK_FRONTMATTER_KEYS)}"
+    )
+    assert frontmatter.get("user-invocable") is True, (
+        "work: the driver is user-invocable as /skillflow:work"
+    )
+    assert _allowed_tools(frontmatter) == WORK_ALLOWED_TOOLS, (
+        f"work: unexpected tool grant {frontmatter.get('allowed-tools')!r}"
+    )
+    assert frontmatter.get("description"), "work: empty description"
+
+
+def test_work_references_only_existing_driver_subcommands():
+    _, _, text = _read_skill("work")
+    found = SUBCOMMAND_PATTERN.findall(text)
+    assert found, "work: driver references no CLI subcommand"
+    subcommands = _parser_subcommands()
+    unknown = [sub for sub in found if sub not in subcommands]
+    assert not unknown, f"work: references unknown subcommands {unknown}"
+    foreign = [sub for sub in found if sub not in DRIVER_SUBCOMMANDS]
+    assert not foreign, (
+        "work: driver must only start, inspect, or resolve Runs, "
+        f"found `skillflow {foreign}`"
+    )
+    assert set(found) == DRIVER_SUBCOMMANDS, (
+        f"work: driver must use all of {sorted(DRIVER_SUBCOMMANDS)}, "
+        f"found {sorted(set(found))}"
+    )
+
+
+def test_work_has_no_hardcoded_skill_names():
+    _, _, text = _read_skill("work")
+    workflow = load_workflow(REFERENCE)
+    hardcoded = [step.skill for step in workflow.steps if step.skill in text]
+    assert not hardcoded, (
+        f"work: driver must parse the skill from CLI output, not name it; "
+        f"found {hardcoded}"
+    )
+
+
+def test_work_branches_on_envelope_codes():
+    _, _, text = _read_skill("work")
+    for code in (
+        "TaskAlreadyCompleted",
+        "TaskCancelled",
+        "AmbiguousCurrentTask",
+        "HumanDecisionRequired",
+    ):
+        assert code in text, f"work: driver has no branch for {code}"
+    assert "AskUserQuestion" in text, (
+        "work: driver must ask the user which Task to continue on ambiguity"
+    )
+
+
+def test_work_after_skill_checks():
+    _, _, text = _read_skill("work")
+    assert "FAILED" in text, (
+        "work: a FAILED skill reply must stop the loop with no retry"
+    )
+    assert "did not complete" in text, (
+        "work: a skill that leaves its Run running must be reported and stop"
+    )
+    assert "remember the Run id" in text, (
+        "work: the dispatched Run id must be remembered for the same-Run check"
+    )
+
+
+def test_work_uses_cli_form_only():
+    _, _, text = _read_skill("work")
+    assert "/skillflow:" not in text, (
+        "work: body must use the `skillflow <subcommand>` CLI form, never the "
+        "verbose /skillflow:* commands (they do in-session step work)"
+    )
+
+
+def test_work_no_lifecycle_logic_markers():
+    _, _, text = _read_skill("work")
+    present = [marker for marker in LOGIC_MARKERS if marker in text]
+    assert not present, f"work: business-logic markers {present}"
+
+
+def test_work_never_rules():
+    _, _, text = _read_skill("work")
+    assert ".skillflow/" in text, "work: driver must never edit `.skillflow/`"
+    assert "YAML" in text, "work: driver must never read workflow YAML"
+    assert "outcome" in text, "work: driver must never choose outcomes"
