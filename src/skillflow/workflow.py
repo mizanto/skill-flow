@@ -125,10 +125,10 @@ class OutcomeRule:
 
     * ``step`` -- a step id within this same Workflow (checked by
       ``Workflow.__post_init__``).
-    * ``skill`` -- a skill name, which need **not** be a step. SF-A-4 §9 maps
-      ``fundamental_assumption_wrong`` to ``{action: run, skill: research}`` and
-      ``research`` is not a step in the reference workflow, so ``skill`` is
-      never validated against the step list.
+    * ``skill`` -- a skill name, which need **not** be a step. SF-A-4 §9's
+      example maps ``fundamental_assumption_wrong`` to ``{action: run, skill:
+      research}``, so ``skill`` is never validated against the step list.
+      (The reference workflow routes to its ``research`` step instead, SF-42.)
 
     ``human``, ``complete`` and ``cancel`` take no target.
     """

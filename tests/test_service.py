@@ -59,7 +59,13 @@ from skillflow.service import (
 from skillflow.workflow import ActionType, Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Tests for the reference ``software-change`` Workflow Definition (SF-8).
+"""Tests for the reference ``software-change`` Workflow Definition (SF-8, SF-42).
 
 The deliverable of SF-8 is a real definition file, ``workflows/software-change.yaml``,
 not a Python module. These tests load that file through the public
@@ -7,11 +7,12 @@ and assert:
 
 * its full shape (name, step order, execution parameters, expected outputs);
 * each of the four SF-A-4 §14 acceptance scenarios (happy path, review/rework,
-  fundamental-assumption -> research, human decision);
-* that only the ``review`` step branches, and that no excluded lifecycle
-  concept (Router / Transition / Loop / Iteration / Rework / Handoff /
-  Instance / Stage) leaks into a step id, skill name, outcome key, or
-  decision key.
+  fundamental-assumption -> the research step, human decision);
+* the exact outcome/decision keys per step, that every ``run`` rule targets a
+  step (SF-42: no skill-targeted Runs in the product workflow), and that no
+  excluded lifecycle concept (Router / Transition / Loop / Iteration /
+  Rework / Handoff / Instance / Stage) leaks into a step id, skill name,
+  outcome key, or decision key.
 
 Tests 2-4 and 9 are change-detectors: if the reference procedure is edited
 later, they fail loudly rather than silently accepting the change.
@@ -24,7 +25,7 @@ from skillflow.workflow_loader import load_workflow
 
 REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
 
-CHAIN = ["requirements", "decomposition", "implementation", "review"]
+CHAIN = ["research", "decomposition", "implementation", "review"]
 
 
 def test_reference_workflow_loads_and_validates():
@@ -36,17 +37,17 @@ def test_name_and_step_order():
     workflow = load_workflow(REFERENCE)
     assert workflow.name == "software-change"
     assert [step.id for step in workflow.steps] == CHAIN
-    assert workflow.initial_step.id == "requirements"
+    assert workflow.initial_step.id == "research"
 
 
 def test_execution_parameters():
     workflow = load_workflow(REFERENCE)
     params = {step.id: (step.skill, step.model, step.effort) for step in workflow.steps}
     assert params == {
-        "requirements": ("requirements-analysis", "opus", "high"),
-        "decomposition": ("decomposition", "opus", "high"),
-        "implementation": ("implementation", "sonnet", "high"),
-        "review": ("code-review", "opus", "high"),
+        "research": ("skillflow:research", "opus", "high"),
+        "decomposition": ("skillflow:decomposition", "opus", "high"),
+        "implementation": ("skillflow:implementation", "sonnet", "high"),
+        "review": ("skillflow:code-review", "opus", "high"),
     }
 
 
@@ -57,7 +58,7 @@ def test_expected_outputs():
         for step in workflow.steps
     }
     assert outputs == {
-        "requirements": (("requirements", True),),
+        "research": (("research", True),),
         "decomposition": (("plan", True),),
         "implementation": (),
         "review": (("review", True),),
@@ -68,10 +69,10 @@ def test_context_declarations():
     workflow = load_workflow(REFERENCE)
     context = {step.id: step.context for step in workflow.steps}
     assert context == {
-        "requirements": (),
-        "decomposition": ("requirements", "research"),
-        "implementation": ("requirements", "plan", "review"),
-        "review": ("requirements", "plan"),
+        "research": ("review", "plan", "research"),
+        "decomposition": ("research", "review"),
+        "implementation": ("plan", "review"),
+        "review": ("research", "plan"),
     }
 
 
@@ -92,23 +93,24 @@ def test_scenario_b_review_rework():
     assert rule.step == "implementation"
 
 
-def test_scenario_c_research_is_a_skill_not_a_step():
+def test_scenario_c_research_is_a_step():
+    # SF-42: a failed assumption returns the Task to the research step (the
+    # initial step), not to a skill-targeted Run.
     workflow = load_workflow(REFERENCE)
     rule = workflow.find_step("review").outcomes["fundamental_assumption_wrong"]
     assert rule.action is ActionType.RUN
-    assert (rule.skill, rule.step) == ("research", None)
-    assert workflow.find_step("research") is None
+    assert (rule.step, rule.skill) == ("research", None)
+    assert workflow.find_step("research") is workflow.initial_step
 
 
 def test_scenario_c_replan_returns_to_decomposition():
-    # SF-32: the skill Run's continuation edge. `replan` is an ordinary
-    # outcome key on the review step -- reported by the research Run through
-    # the triggering-step semantics, or directly by a review that concludes
-    # the plan must be redone without research.
+    # `replan` is an ordinary outcome key on the research step; it no longer
+    # lives on review.
     workflow = load_workflow(REFERENCE)
-    rule = workflow.find_step("review").outcomes["replan"]
+    rule = workflow.find_step("research").outcomes["replan"]
     assert rule.action is ActionType.RUN
     assert (rule.step, rule.skill) == ("decomposition", None)
+    assert "replan" not in workflow.find_step("review").outcomes
 
 
 def test_scenario_d_human_decision():
@@ -128,13 +130,31 @@ def test_scenario_d_human_decision():
     )
 
 
-def test_only_the_review_step_branches():
+def test_outcome_and_decision_keys():
+    workflow = load_workflow(REFERENCE)
+    assert {step.id: set(step.outcomes) for step in workflow.steps} == {
+        "research": {"ready", "replan"},
+        "decomposition": {"ready"},
+        "implementation": {"ready"},
+        "review": {
+            "approved",
+            "changes_requested",
+            "fundamental_assumption_wrong",
+            "human_required",
+        },
+    }
+    for step in workflow.steps:
+        if step.id != "review":
+            assert step.decisions == {}
+
+
+def test_every_run_rule_targets_a_step():
     workflow = load_workflow(REFERENCE)
     for step in workflow.steps:
-        if step.id == "review":
-            continue
-        assert set(step.outcomes) == {"ready"}
-        assert step.decisions == {}
+        for rule in (*step.outcomes.values(), *step.decisions.values()):
+            if rule.action is ActionType.RUN:
+                assert rule.step is not None, step.id
+                assert rule.skill is None, step.id
 
 
 def test_no_excluded_lifecycle_concepts():

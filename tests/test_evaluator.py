@@ -7,9 +7,10 @@ Two kinds of test, following ``test_domain.py`` / ``test_workflow.py``:
   SQLite, filesystem, Claude Code, or LLM access" -- so drift toward a workflow
   engine fails loudly.
 * **Behaviour tests** -- the four SF-A-4 §14 acceptance scenarios against the
-  real ``workflows/software-change.yaml``, every rejection in the plan's §9, the
-  linkage ``ValueError``s, determinism, and initial resolution (SF-12): the
-  first step, the missing-Workflow refusal, and the anti-guessing rules.
+  frozen ``runtime-reference/software-change.yaml``, every rejection in the
+  plan's §9, the linkage ``ValueError``s, determinism, and initial resolution
+  (SF-12): the first step, the missing-Workflow refusal, and the anti-guessing
+  rules.
 """
 
 import ast
@@ -43,7 +44,13 @@ from skillflow.evaluator import (
 from skillflow.workflow import ActionType, OutcomeRule, Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 EARLIER = NOW - timedelta(hours=1)

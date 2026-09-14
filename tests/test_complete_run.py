@@ -1,8 +1,8 @@
 """Tests for ``skillflow.complete_run`` (SF-23, SF-24).
 
 Following ``test_prepare_artifacts.py``'s shape: a ``tmp_path`` workspace
-fixture with a ``.git`` marker, ``store.open_store``, and the **real**
-``workflows/software-change.yaml`` copied into ``<root>/workflows/``. Runs
+fixture with a ``.git`` marker, ``store.open_store``, and the frozen
+``runtime-reference/software-change.yaml`` copied into ``<root>/workflows/``. Runs
 are driven into existence with the real ``resolve_task(...)`` wherever
 possible, and earlier steps are completed with the real ``complete_run(...)``
 itself, so the command is exercised against state the system produces.
@@ -61,7 +61,13 @@ from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 @pytest.fixture

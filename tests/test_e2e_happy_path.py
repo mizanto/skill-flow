@@ -1,4 +1,4 @@
-"""Happy-path E2E: Requirements -> Decomposition -> Implementation -> Review -> Done.
+"""Happy-path E2E: Research -> Decomposition -> Implementation -> Review -> Done.
 
 SF-30 (plan ref SF-031, SF-A-6 §11-A): the Wave 5 checkpoint exercised as one
 scenario on the real reference workflow. Each Run is driven through a freshly
@@ -46,23 +46,26 @@ REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change
 #: reason).
 STEPS = (
     (
-        "requirements",
+        # The initial step. Its context declares `review`, `plan` and
+        # `research`, which resolve only when review sends the Task back to
+        # research; on the happy path all three stay unresolved.
+        "research",
         "ready",
-        (("requirements.md", "requirements", "# requirements\n"),),
+        (("research.md", "research", "# research\n"),),
         (),
-        (),
-        (("requirements", True),),
-        ("requirements",),
+        ("review", "plan", "research"),
+        (("research", True),),
+        ("research",),
         (ActionType.RUN, "decomposition", "ready"),
     ),
     (
+        # `review` resolves only on a re-decomposition after review; on the
+        # happy path it is simply unresolved.
         "decomposition",
         "ready",
         (("plan.md", "plan", "# plan\n"),),
-        ("requirements",),
-        # `research` resolves only on a post-research re-decomposition
-        # (SF-32); on the first pass it is simply unresolved.
         ("research",),
+        ("review",),
         (("plan", True),),
         ("plan",),
         (ActionType.RUN, "implementation", "ready"),
@@ -74,7 +77,7 @@ STEPS = (
         "implementation",
         "ready",
         (),
-        ("requirements", "plan"),
+        ("plan",),
         ("review",),
         (),
         (),
@@ -84,7 +87,7 @@ STEPS = (
         "review",
         "approved",
         (("review.md", "review", "# review\n"),),
-        ("requirements", "plan"),
+        ("research", "plan"),
         (),
         (("review", True),),
         ("review",),
@@ -116,7 +119,7 @@ def _session(ws):
         yield conn
 
 
-def test_happy_path_requirements_to_done(ws, workflows):
+def test_happy_path_research_to_done(ws, workflows):
     with _session(ws) as conn:
         register_workflow(conn, load_workflow(REFERENCE))
         task = create_task(
@@ -210,12 +213,12 @@ def test_happy_path_requirements_to_done(ws, workflows):
 
         artifacts = store.list_artifacts_for_task(conn, task_id)
         assert [(a.name, a.type) for a in artifacts] == [
-            ("requirements.md", "requirements"),
+            ("research.md", "research"),
             ("plan.md", "plan"),
             ("review.md", "review"),
         ]
         assert [read_content(ws, a) for a in artifacts] == [
-            "# requirements\n",
+            "# research\n",
             "# plan\n",
             "# review\n",
         ]

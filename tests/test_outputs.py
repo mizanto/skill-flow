@@ -32,7 +32,13 @@ from skillflow.service import create_task
 from skillflow.workflow import ExpectedOutput, Workflow, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 EARLIER = NOW - timedelta(hours=1)

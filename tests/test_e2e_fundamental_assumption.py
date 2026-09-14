@@ -1,13 +1,12 @@
-"""Fundamental-assumption E2E: Implementation -> Review -> research -> replan.
+"""Fundamental-assumption E2E: Review -> research step -> replan -> Review.
 
-SF-32 (plan ref SF-033, SF-A-4 §14-C): the assumption-failure loop exercised
-as one scenario on the real reference workflow. Every Task starts at
-``steps[0]``, so the scenario opens with the happy-path prefix (Requirements,
-Decomposition, Implementation), then drives the loop under test: Review
-completes with ``fundamental_assumption_wrong``, a skill-targeted research
-Run is created, research completes with ``replan``, and the lifecycle
-continues through Decomposition (plan v2), Implementation, and a final
-Review completing with ``approved``.
+SF-42 (SF-A-4 §14-C) on the product reference workflow: Research ->
+Decomposition -> Implementation -> Review completing with
+``fundamental_assumption_wrong`` -> Research completing with ``replan`` ->
+Decomposition -> Implementation -> Review completing with ``approved`` ->
+Task ``completed``. The skill-targeted form of this loop (SF-32) stays
+covered on the frozen runtime fixture by
+``test_e2e_skill_targeted_research.py``.
 
 Each Run is driven through a freshly opened SQLite connection and only
 string ids cross the Run boundary (plus the stateless ``Workspace``
@@ -16,27 +15,27 @@ checkout handle, which holds no session state) -- the mechanical form of
 ``Task``/``Run``/``RunInput``) may pass from one Run to the next; every
 command re-resolves its state from SQLite + workspace files.
 
-The scenario pins the SF-32 contract end to end:
+The scenario pins the SF-42 contract end to end:
 
-* the ``fundamental_assumption_wrong`` completion evaluates to a research
-  Run (``run`` with ``skill="research"``, no step), and the next resolve
-  creates it -- an ordinary outcome rule, not a Rework entity;
-* the research Run's provenance names the review Run with reason
-  ``fundamental_assumption_wrong`` (SF-A-4 §8);
-* the research Run resolves the triggering review Run's artifacts as
-  context (the v1 review that found the bad assumption);
-* the research Run has no declared outputs, so ``prepare-artifacts``
-  reports ``StepUnresolved`` and writes nothing;
-* research completes with ``replan`` -- validated against the triggering
-  review step's table and persisted as ``Outcome(type="review")`` -- and
-  evaluates to a Decomposition Run;
-* the second Decomposition resolves ``research.md`` v1 (criterion: research
-  output becomes available to subsequent resolution) and produces
-  ``plan.md`` v2; Implementation and Review consume plan v2, not research;
-* ``plan.md`` v1 -> v2 and ``review.md`` v1 -> v2 are immutable version
-  chains across Runs;
-* the original Runs remain in history with their canonical Results;
-* the terminal tail: Task ``completed`` and no 9th Run.
+* the ``fundamental_assumption_wrong`` completion evaluates to a Run of the
+  ``research`` step -- an ordinary outcome rule targeting an earlier step,
+  not a Rework entity and not a skill-targeted Run;
+* the re-entered research Run's provenance names the review Run with reason
+  ``fundamental_assumption_wrong`` (SF-A-4 §8), and its context is review
+  v1, plan v1 and research v1 in declaration order;
+* every Run has a step, so ``prepare-artifacts`` reports the missing
+  required outputs for each, and writes nothing;
+* research completes with ``replan``, validated against the research step's
+  own table and persisted as ``Outcome(type="research")``, and evaluates to
+  a Decomposition Run;
+* the second Decomposition consumes research v2 and review v1 and produces
+  plan v2; Implementation consumes plan v2; the final Review consumes
+  research v2 and plan v2;
+* ``research.md``, ``plan.md`` and ``review.md`` form immutable v1 -> v2
+  version chains across Runs;
+* the terminal tail: Task ``completed`` and no 9th Run;
+* the same walk through the ``skillflow`` CLI entry point, including the
+  printed context of the re-entered research Run.
 """
 
 import contextlib
@@ -46,10 +45,10 @@ import pytest
 
 from skillflow import store, workspace
 from skillflow.artifacts import read_content
+from skillflow.cli import main
 from skillflow.complete_run import complete_run as complete
 from skillflow.completion import ArtifactSubmission, CompletionRequest
 from skillflow.domain import RunStatus, TaskStatus
-from skillflow.prepare_artifacts import PrepareArtifactsError
 from skillflow.prepare_artifacts import prepare_artifacts as prepare
 from skillflow.resolve_task import ResolveTaskError
 from skillflow.resolve_task import resolve_task as resolve
@@ -60,123 +59,114 @@ from skillflow.workflow_loader import load_workflow
 _TEST_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = _TEST_ROOT / "workflows" / "software-change.yaml"
 
-#: One row per Run: step id (None for the skill-targeted research Run),
-#: outcome type persisted on the Result (the interpreting step: the Run's
-#: own step, or the triggering step for the research Run), completion
-#: decision, artifact submissions as (name, type, content), expected
-#: resolved context types in declaration order, expected unresolved context
-#: types, expected declared outputs as (type, required), expected
-#: pre-completion missing required output types (unused for the research
-#: Run, whose prepare raises StepUnresolved instead), and the expected
-#: evaluated next action as (ActionType, step-or-None, skill-or-None,
-#: reason).
+#: One row per Run: step id, completion decision, artifact submissions as
+#: (name, type, content), expected resolved context types in declaration
+#: order, expected unresolved context types, expected declared outputs as
+#: (type, required), expected pre-completion missing required output types,
+#: and the expected evaluated next action as (ActionType, step-or-None,
+#: reason). The persisted outcome type is always the Run's own step id.
 STEPS = (
     (
-        "requirements",
-        "requirements",
+        "research",
         "ready",
-        (("requirements.md", "requirements", "# requirements\n"),),
+        (("research.md", "research", "# research\n"),),
         (),
-        (),
-        (("requirements", True),),
-        ("requirements",),
-        (ActionType.RUN, "decomposition", None, "ready"),
+        ("review", "plan", "research"),
+        (("research", True),),
+        ("research",),
+        (ActionType.RUN, "decomposition", "ready"),
     ),
     (
-        "decomposition",
         "decomposition",
         "ready",
         (("plan.md", "plan", "# plan\n"),),
-        ("requirements",),
-        # `research` resolves only on the post-research pass below; on the
-        # first pass it is simply unresolved.
         ("research",),
+        ("review",),
         (("plan", True),),
         ("plan",),
-        (ActionType.RUN, "implementation", None, "ready"),
+        (ActionType.RUN, "implementation", "ready"),
     ),
     (
         # Declares outcomes but no outputs: the legal payload is an outcome
-        # with zero submissions. Its context declares `review`, which no Run
-        # has produced yet on the first pass, so it stays unresolved.
-        "implementation",
+        # with zero submissions.
         "implementation",
         "ready",
         (),
-        ("requirements", "plan"),
+        ("plan",),
         ("review",),
         (),
         (),
-        (ActionType.RUN, "review", None, "ready"),
+        (ActionType.RUN, "review", "ready"),
     ),
     (
-        # The review that finds the bad assumption. The outcome routes to a
-        # skill, not a step -- an ordinary outcome rule, not a Rework entity.
-        "review",
+        # The review that finds the bad assumption. The outcome routes back
+        # to the research step -- an ordinary outcome rule.
         "review",
         "fundamental_assumption_wrong",
         (("review.md", "review", "# review: fundamental assumption wrong\n"),),
-        ("requirements", "plan"),
+        ("research", "plan"),
         (),
         (("review", True),),
         ("review",),
-        (ActionType.RUN, None, "research", "fundamental_assumption_wrong"),
+        (ActionType.RUN, "research", "fundamental_assumption_wrong"),
     ),
     (
-        # The research Run: no step, no declared outputs, no execution
-        # parameters. Its context is the triggering review Run's artifacts.
-        # It reports `replan`, validated against the review step's table.
-        None,
-        "review",
+        # The re-entered research Run: every declared context type resolves
+        # now. It must produce its own `research` artifact (per-Run output
+        # scope), which becomes v2 of the chain.
+        "research",
         "replan",
         (("research.md", "research", "# research: corrected assumption\n"),),
-        ("review",),
+        ("review", "plan", "research"),
         (),
-        (),
-        (),
-        (ActionType.RUN, "decomposition", None, "replan"),
+        (("research", True),),
+        ("research",),
+        (ActionType.RUN, "decomposition", "replan"),
     ),
     (
-        # Re-decomposition: `research` now resolves to the findings, and
-        # this Run must produce its own `plan` artifact (per-Run output
-        # scope), which becomes v2 of the chain.
-        "decomposition",
+        # Re-decomposition: research v2 and the v1 review; produces plan v2.
         "decomposition",
         "ready",
         (("plan.md", "plan", "# plan: revised\n"),),
-        ("requirements", "research"),
+        ("research", "review"),
         (),
         (("plan", True),),
         ("plan",),
-        (ActionType.RUN, "implementation", None, "ready"),
+        (ActionType.RUN, "implementation", "ready"),
     ),
     (
-        # Sees requirements, plan v2 (latest version), and the v1 review --
-        # but not the research output, which only decomposition consumes.
-        "implementation",
         "implementation",
         "ready",
         (),
-        ("requirements", "plan", "review"),
+        ("plan", "review"),
         (),
         (),
         (),
-        (ActionType.RUN, "review", None, "ready"),
+        (ActionType.RUN, "review", "ready"),
     ),
     (
         # v1 exists, but output scope is the current Run: this Run must
         # produce its own `review` artifact, which becomes v2 of the chain.
         "review",
-        "review",
         "approved",
         (("review.md", "review", "# review: approved\n"),),
-        ("requirements", "plan"),
+        ("research", "plan"),
         (),
         (("review", True),),
         ("review",),
-        (ActionType.COMPLETE, None, None, "approved"),
+        (ActionType.COMPLETE, None, "approved"),
     ),
 )
+
+STEP_IDS = [row[0] for row in STEPS]
+
+#: The skill each step's Run is printed with by `resolve-task`.
+SKILLS = {
+    "research": "skillflow:research",
+    "decomposition": "skillflow:decomposition",
+    "implementation": "skillflow:implementation",
+    "review": "skillflow:code-review",
+}
 
 
 @pytest.fixture
@@ -202,25 +192,28 @@ def _session(ws):
         yield conn
 
 
-def test_fundamental_assumption_loop_to_approved(ws, workflows):
+def _new_task(ws):
     with _session(ws) as conn:
         register_workflow(conn, load_workflow(REFERENCE))
         task = create_task(
             conn, title="Ship it", workflow_definition_id="software-change"
         )
-        task_id = task.id
+        return task.id
+
+
+def test_fundamental_assumption_loop_to_approved(ws, workflows):
+    task_id = _new_task(ws)
 
     run_ids = []
     for index, (
         step_id,
-        outcome_type,
         decision,
         submissions,
         context_types,
         unresolved,
         outputs,
         missing,
-        (action, next_step, next_skill, reason),
+        (action, next_step, reason),
     ) in enumerate(STEPS):
         # A new session per Run: only string ids (`task_id`, the
         # collected `run_ids`) and the stateless `ws` handle cross in.
@@ -234,47 +227,31 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
             seen_outputs = [(o.type, o.required) for o in run_input.outputs]
             assert seen_outputs == list(outputs)
 
-            events = store.list_lifecycle_events_for_task(conn, task_id)
-            events_before = len(events)
-            if step_id is None:
-                # The research Run declares no outputs, so there is nothing
-                # to inspect: prepare-artifacts reports StepUnresolved and
-                # writes nothing.
-                with pytest.raises(PrepareArtifactsError) as exc_info:
-                    prepare(conn, ws, task_id=task_id)
-                assert exc_info.value.code == "StepUnresolved"
-                assert run_input.run_id in str(exc_info.value)
-                assert (
-                    len(store.list_lifecycle_events_for_task(conn, task_id))
-                    == events_before
-                )
-            else:
-                report = prepare(conn, ws, task_id=task_id)
-                assert report.run_id == run_input.run_id
-                assert report.step_id == step_id
-                actual = tuple(c.type for c in report.validation.missing_required)
-                assert actual == missing
-                # prepare-artifacts is a read-only inspection: no rows,
-                # no events.
-                assert (
-                    len(store.list_lifecycle_events_for_task(conn, task_id))
-                    == events_before
-                )
+            events_before = len(store.list_lifecycle_events_for_task(conn, task_id))
+            report = prepare(conn, ws, task_id=task_id)
+            assert report.run_id == run_input.run_id
+            assert report.step_id == step_id
+            actual = tuple(c.type for c in report.validation.missing_required)
+            assert actual == missing
+            # prepare-artifacts is a read-only inspection: no rows, no events.
+            assert (
+                len(store.list_lifecycle_events_for_task(conn, task_id))
+                == events_before
+            )
 
+            ctx = [(a.type, a.version, a.run_id) for a in run_input.context.artifacts]
             if index == 4:
-                # The research RunInput: no step, the action's skill, no
-                # execution parameters, no declared outputs.
-                assert run_input.skill == "research"
-                assert run_input.model is None
-                assert run_input.effort is None
+                # The re-entered research Run: the step's own execution
+                # parameters, and review v1, plan v1, research v1 as context.
+                assert run_input.skill == "skillflow:research"
+                assert run_input.model == "opus"
+                assert run_input.effort == "high"
                 assert run_input.instructions is None
-                # Its context is the triggering review Run's artifacts: the
-                # v1 review that found the bad assumption.
-                ctx_artifacts = run_input.context.artifacts
-                assert len(ctx_artifacts) == 1
-                [review] = ctx_artifacts
-                assert review.version == 1
-                assert review.run_id == run_ids[3]
+                assert ctx == [
+                    ("review", 1, run_ids[3]),
+                    ("plan", 1, run_ids[1]),
+                    ("research", 1, run_ids[0]),
+                ]
                 # Sequential integrity across the loop: a second resolve
                 # while this Run is running is rejected; the Run itself is
                 # untouched.
@@ -283,22 +260,18 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
                 assert exc_info.value.code == "ActiveRunExists"
 
             if index == 5:
-                # Re-decomposition sees the research findings.
-                ctx_artifacts = run_input.context.artifacts
-                [research] = [a for a in ctx_artifacts if a.type == "research"]
-                assert research.version == 1
-                assert research.run_id == run_ids[4]
+                # Re-decomposition sees the corrected research and the review.
+                assert ctx == [
+                    ("research", 2, run_ids[4]),
+                    ("review", 1, run_ids[3]),
+                ]
 
             if index == 6:
-                # The second implementation sees plan v2, not research.
-                ctx_artifacts = run_input.context.artifacts
-                [plan] = [a for a in ctx_artifacts if a.type == "plan"]
-                assert plan.version == 2
-                assert [a.type for a in ctx_artifacts] == [
-                    "requirements",
-                    "plan",
-                    "review",
-                ]
+                # The second implementation sees plan v2 and the v1 review.
+                assert ctx == [("plan", 2, run_ids[5]), ("review", 1, run_ids[3])]
+
+            if index == 7:
+                assert ctx == [("research", 2, run_ids[4]), ("plan", 2, run_ids[5])]
 
             done = complete(
                 conn,
@@ -315,7 +288,7 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
             assert done.action is not None
             assert done.action.action is action
             assert done.action.step == next_step
-            assert done.action.skill == next_skill
+            assert done.action.skill is None
             assert done.action.reason == reason
             assert done.run.status is RunStatus.COMPLETED
             assert done.result.run_id == run_input.run_id
@@ -323,7 +296,7 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
             assert (
                 done.result.outcome.type,
                 done.result.outcome.decision,
-            ) == (outcome_type, decision)
+            ) == (step_id, decision)
             run_ids.append(run_input.run_id)
             # Only `task_id` / `run_ids` (plain strings) leave the session.
 
@@ -335,16 +308,7 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
         runs = store.list_runs_for_task(conn, task_id)
         assert [run.id for run in runs] == run_ids
         assert all(run.status is RunStatus.COMPLETED for run in runs)
-        assert [run.step_id for run in runs] == [
-            "requirements",
-            "decomposition",
-            "implementation",
-            "review",
-            None,
-            "decomposition",
-            "implementation",
-            "review",
-        ]
+        assert [run.step_id for run in runs] == STEP_IDS
         assert runs[0].triggered_by_run_id is None
         assert runs[0].trigger_reason == "initial"
         expected_reasons = (
@@ -356,6 +320,7 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
             "ready",
             "ready",
         )
+        assert len(expected_reasons) == len(runs) - 1
         for previous, run, expected in zip(
             runs, runs[1:], expected_reasons, strict=False
         ):
@@ -369,36 +334,72 @@ def test_fundamental_assumption_loop_to_approved(ws, workflows):
 
         artifacts = store.list_artifacts_for_task(conn, task_id)
         assert [(a.name, a.type, a.version) for a in artifacts] == [
-            ("requirements.md", "requirements", 1),
+            ("research.md", "research", 1),
             ("plan.md", "plan", 1),
             ("review.md", "review", 1),
-            ("research.md", "research", 1),
+            ("research.md", "research", 2),
             ("plan.md", "plan", 2),
             ("review.md", "review", 2),
         ]
         assert [read_content(ws, a) for a in artifacts] == [
-            "# requirements\n",
+            "# research\n",
             "# plan\n",
             "# review: fundamental assumption wrong\n",
             "# research: corrected assumption\n",
             "# plan: revised\n",
             "# review: approved\n",
         ]
-        plan_v1, plan_v2 = artifacts[1], artifacts[4]
-        assert plan_v1.supersedes_id is None
-        assert plan_v2.supersedes_id == plan_v1.id
-        assert plan_v1.run_id == run_ids[1]
-        assert plan_v2.run_id == run_ids[5]
-        first_review, second_review = artifacts[2], artifacts[5]
-        assert first_review.supersedes_id is None
-        assert second_review.supersedes_id == first_review.id
-        assert first_review.run_id == run_ids[3]
-        assert second_review.run_id == run_ids[7]
-        (research,) = [a for a in artifacts if a.type == "research"]
-        assert research.supersedes_id is None
-        assert research.run_id == run_ids[4]
+        for v1, v2, (run_v1, run_v2) in (
+            (artifacts[0], artifacts[3], (0, 4)),
+            (artifacts[1], artifacts[4], (1, 5)),
+            (artifacts[2], artifacts[5], (3, 7)),
+        ):
+            assert v1.supersedes_id is None
+            assert v2.supersedes_id == v1.id
+            assert v1.run_id == run_ids[run_v1]
+            assert v2.run_id == run_ids[run_v2]
 
         # No 9th Run: a terminal Task takes no further Runs.
         with pytest.raises(ResolveTaskError) as exc_info:
             resolve(conn, ws, task_id=task_id)
         assert exc_info.value.code == "TaskAlreadyCompleted"
+
+
+def test_fundamental_assumption_cli_walk(ws, workflows, monkeypatch, capsys):
+    # The same walk through the `skillflow` entry point, as a user would
+    # type it: resolve-task, write the durable files, complete-run.
+    task_id = _new_task(ws)
+    monkeypatch.chdir(ws.root)
+
+    for index, (step_id, decision, submissions, *_, next_action) in enumerate(STEPS):
+        assert main(["resolve-task", task_id]) == 0
+        resolved = capsys.readouterr().out
+        skill = SKILLS[step_id]
+        assert f"step {step_id!r} via skill {skill!r}" in resolved
+
+        if index == 4:
+            # The re-entered research Run prints review v1, plan v1 and
+            # research v1 as its context, in declaration order.
+            assert (
+                "Context:\n"
+                "  - review.md (review v1)\n"
+                "  - plan.md (plan v1)\n"
+                "  - research.md (research v1)\n"
+            ) in resolved
+
+        args = ["complete-run", "--outcome", decision]
+        for name, type_, body in submissions:
+            (ws.root / name).write_text(body, encoding="utf-8")
+            args += ["--artifact", f"{name}:{type_}:{name}"]
+        assert main(args) == 0
+        completed = capsys.readouterr().out
+        action, next_step, _ = next_action
+        if action is ActionType.RUN:
+            assert f"Next action:\nRun {next_step}." in completed
+        else:
+            assert "Task status:\ncompleted" in completed
+
+    with _session(ws) as conn:
+        assert store.get_task(conn, task_id).status is TaskStatus.COMPLETED
+        runs = store.list_runs_for_task(conn, task_id)
+        assert [run.step_id for run in runs] == STEP_IDS

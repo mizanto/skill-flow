@@ -188,7 +188,7 @@ output (repeatable; `PATH` is read as UTF-8 relative to the working
 directory):
 
 ```bash
-skillflow complete-run --outcome ready --artifact requirements.md:requirements:requirements.md
+skillflow complete-run --outcome ready --artifact research.md:research:research.md
 ```
 
 Steps that declare no outputs take zero `--artifact` flags; steps that
@@ -288,7 +288,7 @@ A working target repository looks like this:
 │   │                      # lifecycle_events (SQLite)
 │   ├── artifacts/         # durable artifact content
 │   └── runs/<run-id>/     # per-run diagnostics (output.log on failure)
-├── requirements.md        # ordinary project files (become artifacts
+├── research.md            # ordinary project files (become artifacts
 ├── plan.md                #   only when submitted at completion)
 └── ...
 ```

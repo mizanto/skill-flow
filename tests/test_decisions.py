@@ -9,7 +9,7 @@ Two kinds of test, following ``test_completion.py``:
   the module *cannot* write), the single-exception-class shape, and the
   absence of a global decision enum.
 * **Behaviour tests** -- valid decision requests (including every key of
-  the real ``review`` step from ``workflows/software-change.yaml``) and
+  the ``review`` step of ``runtime-reference/software-change.yaml``) and
   invalid ones (each proving its rejection code), plus determinism and the
   validate→evaluate seam.
 """
@@ -37,7 +37,13 @@ from skillflow.evaluator import EvaluationInput, evaluate
 from skillflow.workflow import ActionType, OutcomeRule, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 def _step(**over):

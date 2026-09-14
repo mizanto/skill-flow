@@ -47,7 +47,14 @@ from skillflow.workflow import ActionType
 from skillflow.workflow_loader import load_workflow
 
 _TEST_ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = _TEST_ROOT / "workflows" / "software-change.yaml"
+REFERENCE = (
+    _TEST_ROOT
+    / "tests"
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 DIAGNOSTICS = "boom: OOM while linking\n"
 

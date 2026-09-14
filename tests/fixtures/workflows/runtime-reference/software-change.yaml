@@ -1,37 +1,34 @@
-# The reference SkillFlow Workflow Definition (SF-8, realigned by SF-42).
+# Frozen runtime test fixture (SF-42): the pre-SF-42 reference workflow.
 #
-# Research -> Decomposition -> Implementation -> Review, with the outcome
-# branches of SF-A-4 §14. Every deviation from the normal sequence is an
-# outcome-to-action rule: there is no Loop, Rework, Iteration, Router, or
-# Transition concept, and none is needed.
+# Runtime tests load it to keep coverage of requirements-first flows and
+# skill-targeted Runs (review/fundamental_assumption_wrong -> skill research).
+# NOT the product reference definition -- that is workflows/software-change.yaml.
 #
-# Loaded with skillflow.workflow_loader.load_workflow; the schema and every
-# validation rule are documented in docs/workflow-schema.md.
+# The body below is byte-identical to workflows/software-change.yaml before
+# SF-42; do not edit it.
 name: software-change
 
 steps:
   # The normal starting step (Workflow.initial_step is steps[0]).
-  - id: research
-    skill: skillflow:research
+  - id: requirements
+    skill: requirements-analysis
     model: opus
     effort: high
-    # All three resolve only when review sends the Task back to research
-    # (fundamental_assumption_wrong); on the first pass they are unresolved.
-    context: [review, plan, research]
     outputs:
-      - type: research
+      - type: requirements
         required: true
     outcomes:
-      ready:  { action: run, step: decomposition }       # A: happy path
-      # C: research after a failed assumption concludes the plan must be redone.
-      replan: { action: run, step: decomposition }
+      ready: { action: run, step: decomposition }        # A: happy path
 
   - id: decomposition
-    skill: skillflow:decomposition
+    skill: decomposition
     model: opus
     effort: high
-    # 'review' resolves only on a re-decomposition after review.
-    context: [research, review]
+    # Consumes the requirements produced by the first step (SF-A-1 §9) plus
+    # the research findings when re-decomposing after SF-A-4 §9 research
+    # (SF-32): 'research' resolves only on that pass, like 'review' on
+    # implementation.
+    context: [requirements, research]
     outputs:
       - type: plan
         required: true
@@ -39,24 +36,24 @@ steps:
       ready: { action: run, step: implementation }       # A
 
   # Declares no expected outputs: the durable outputs of a change are the
-  # repository's own files.
+  # repository's own files, and SF-A-6 §2 gives this step none.
   - id: implementation
-    skill: skillflow:implementation
+    skill: implementation
     model: sonnet
     effort: high
     # 'review' resolves only on a rework Run (after review/changes_requested);
     # on the first pass it is simply unresolved. This declares "this step reads
     # reviews", not a transition -- the rework routing stays in
     # review.outcomes.changes_requested.
-    context: [plan, review]
+    context: [requirements, plan, review]
     outcomes:
       ready: { action: run, step: review }               # A
 
   - id: review
-    skill: skillflow:code-review
+    skill: code-review
     model: opus
     effort: high
-    context: [research, plan]
+    context: [requirements, plan]
     outputs:
       - type: review
         required: true
@@ -65,8 +62,13 @@ steps:
       approved:                     { action: complete }
       # B: review / rework -- an ordinary rule targeting an earlier step.
       changes_requested:            { action: run, step: implementation }
-      # C: SF-A-4 §9 -- back to the research step, with this review as context.
-      fundamental_assumption_wrong: { action: run, step: research }
+      # C: SF-A-4 §9 -- a skill target, deliberately not a step in this
+      # workflow, and never validated against the step list.
+      fundamental_assumption_wrong: { action: run, skill: research }
+      # C2: research -- or the review itself -- concludes the plan must be
+      # redone. An ordinary rule targeting an earlier step, like B; the
+      # skill-Run interpretation is SF-32's gap-fill, not a new entity.
+      replan:                       { action: run, step: decomposition }
       # D: hand the Task to /skillflow:decide (Task -> waiting_for_human).
       human_required:               { action: human }
     # D: the decisions /skillflow:decide accepts for this step. A decision

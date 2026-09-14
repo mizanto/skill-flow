@@ -47,7 +47,14 @@ from skillflow.workflow import ActionType
 from skillflow.workflow_loader import load_workflow
 
 _TEST_ROOT = Path(__file__).resolve().parents[1]
-REFERENCE = _TEST_ROOT / "workflows" / "software-change.yaml"
+REFERENCE = (
+    _TEST_ROOT
+    / "tests"
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 #: One row per Run: step id, completion decision, artifact submissions as
 #: (name, type, content), expected resolved context types in declaration

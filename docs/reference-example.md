@@ -52,61 +52,64 @@ skillflow show-task "$TASK"
 ```
 
 ```text
-task-cde9c20e4bce442990af7c2f9f69a4d5
-Task task-cde9c20e4bce442990af7c2f9f69a4d5: Ship it (active)
+task-a0668ec1db08495f93cb7c4b7fe77dbe
+Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it (active)
 Workflow: software-change
-Created: 2026-09-09T20:54:38.887270+00:00 Updated: 2026-09-09T20:54:38.887270+00:00
+Created: 2026-09-14T16:06:28.766317+00:00 Updated: 2026-09-14T16:06:28.766317+00:00
 
 Runs: none
 
 Events (1):
-  2026-09-09T20:54:38.887270+00:00 task.created status=active, workflow_definition_id=software-change
+  2026-09-14T16:06:28.766317+00:00 task.created status=active, workflow_definition_id=software-change
 ```
 
-## 1. Happy path: requirements → decomposition → implementation → review
+## 1. Happy path: research → decomposition → implementation → review
 
-**Run 1 — requirements.** Resolve, write the requirements file, check
-the gap, complete with the `ready` outcome:
+**Run 1 — research.** Resolve, write the research file, check the gap,
+complete with the `ready` outcome:
 
 ```bash
 skillflow resolve-task "$TASK"
-cat > requirements.md <<'EOF'
-# Requirements
+cat > research.md <<'EOF'
+# Research
 - The change ships behind review.
 EOF
 skillflow prepare-artifacts
-skillflow complete-run --outcome ready --artifact requirements.md:requirements:requirements.md
+skillflow complete-run --outcome ready --artifact research.md:research:research.md
 ```
 
 ```text
-Task task-cde9c20e4bce442990af7c2f9f69a4d5: Ship it
-Run run-72803a4aca04495a997273dfa29561d8 (running) -- step 'requirements' via skill 'requirements-analysis'
+Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it
+Run run-ad56d693ea464e0795e6b4dc5e9d00a3 (running) -- step 'research' via skill 'skillflow:research'
 Execution: model: opus, effort: high
 Context: none selected
+Unresolved context types: review, plan, research
 Expected outputs:
-  - requirements (required)
+  - research (required)
 Next: do the bounded work for this step, then run `/skillflow:prepare-artifacts`.
 [...]
-✗ requirements (required)
+✗ research (required)
 [...]
-Run run-72803a4aca04495a997273dfa29561d8 completed.
+Run run-ad56d693ea464e0795e6b4dc5e9d00a3 completed.
 
 Next action:
 Run decomposition.
 
 Start the next Run in a new Claude Code session:
 
-/skillflow:resolve-task task-cde9c20e4bce442990af7c2f9f69a4d5
+/skillflow:resolve-task task-a0668ec1db08495f93cb7c4b7fe77dbe
 ```
 
-Note `✗ requirements (required)`: `prepare-artifacts` compares expected
+Note `✗ research (required)`: `prepare-artifacts` compares expected
 outputs against *registered* artifacts, and nothing is registered until
 completion — everything missing on a fresh run is normal. Its value is
-telling you exactly what to produce.
+telling you exactly what to produce. The unresolved context types
+(`review`, `plan`, `research`) resolve only when a review sends the Task
+back to research.
 
 **Run 2 — decomposition.** The previous run's artifact arrives as
-context; `research` stays unresolved (it only resolves after a
-research Run, which this path never takes):
+context; `review` stays unresolved (it only resolves after a review
+sends the Task back, which this path never does):
 
 ```bash
 skillflow resolve-task "$TASK"
@@ -119,11 +122,11 @@ skillflow complete-run --outcome ready --artifact plan.md:plan:plan.md
 
 ```text
 [...]
-Run run-c934e7f88a11411bb76537bc113c231d (running) -- step 'decomposition' via skill 'decomposition'
+Run run-1b1449e1752b43a8aea36d99a0d157e9 (running) -- step 'decomposition' via skill 'skillflow:decomposition'
 Execution: model: opus, effort: high
 Context:
-  - requirements.md (requirements v1)
-Unresolved context types: research
+  - research.md (research v1)
+Unresolved context types: review
 Expected outputs:
   - plan (required)
 [...]
@@ -144,10 +147,9 @@ skillflow complete-run --outcome ready
 
 ```text
 [...]
-Run run-87a024c0afa54f07a990d13ee2c6eb55 (running) -- step 'implementation' via skill 'implementation'
+Run run-a90ce8cd6151496ba345f0eee5230a6a (running) -- step 'implementation' via skill 'skillflow:implementation'
 Execution: model: sonnet, effort: high
 Context:
-  - requirements.md (requirements v1)
   - plan.md (plan v1)
 Unresolved context types: review
 Expected outputs: none declared
@@ -173,25 +175,25 @@ skillflow show-task "$TASK"
 [...]
 Task status:
 completed
-Task task-cde9c20e4bce442990af7c2f9f69a4d5: Ship it (completed)
+Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it (completed)
 [...]
 Runs (4):
 
-  [1] run-72803a4aca04495a997273dfa29561d8 (completed) -- step 'requirements', workflow 'software-change'
+  [1] run-ad56d693ea464e0795e6b4dc5e9d00a3 (completed) -- step 'research', workflow 'software-change'
       trigger: initial
-      started: 2026-09-09T20:54:43.496857+00:00  completed: 2026-09-09T20:54:43.639306+00:00
-      Result result-c4bb7f4dc2cb47229e251302d788d780 (completed)
-        outcome: requirements/ready
+      started: 2026-09-14T16:06:28.935463+00:00  completed: 2026-09-14T16:06:29.111525+00:00
+      Result result-82f118bb43af487c95ce4f27ddd041c7 (completed)
+        outcome: research/ready
       Artifacts:
-        - requirements.md (requirements v1) id artifact-01fd7b56fcc24cd985a9151450531dfc path task-cde9c20e4bce442990af7c2f9f69a4d5/requirements-v1.md
+        - research.md (research v1) id artifact-a03394584ddb4458a301257464d9e3be path task-a0668ec1db08495f93cb7c4b7fe77dbe/research-v1.md
       Decisions: none
 
   [2..4] ... (decomposition, implementation, review — same shape)
 
 Events (17):
-  2026-09-09T20:54:38.887270+00:00 task.created status=active, workflow_definition_id=software-change
+  2026-09-14T16:06:28.766317+00:00 task.created status=active, workflow_definition_id=software-change
   [...]
-  2026-09-09T20:55:05.617310+00:00 task.status_changed run run-833bfba5967343aeb7cd94f8f2be7f20 action=complete, from=active, reason=approved, to=completed
+  2026-09-14T16:06:29.643907+00:00 task.status_changed run run-5e15788647ed4c678434819306cfd7d5 action=complete, from=active, reason=approved, to=completed
   [...]
 ```
 
@@ -202,7 +204,7 @@ The lifecycle is over: resolving a completed Task fails with
 
 Each branch below uses its own Task in the same scratch repo (all
 previous branches are Done, so no `--task` disambiguation is needed)
-and reuses the `requirements.md` / `plan.md` files. Drive to review,
+and reuses the `research.md` / `plan.md` files. Drive to review,
 then answer `changes_requested` instead of `approved`:
 
 ```bash
@@ -215,7 +217,7 @@ with contextlib.closing(store.open_store(ws)) as conn:
     print(create_task(conn, title='Rework demo', workflow_definition_id='software-change').id)
 ")
 skillflow resolve-task "$TASK2" >/dev/null
-skillflow complete-run --outcome ready --artifact requirements.md:requirements:requirements.md >/dev/null
+skillflow complete-run --outcome ready --artifact research.md:research:research.md >/dev/null
 skillflow resolve-task "$TASK2" >/dev/null
 skillflow complete-run --outcome ready --artifact plan.md:plan:plan.md >/dev/null
 skillflow resolve-task "$TASK2" >/dev/null
@@ -245,10 +247,9 @@ skillflow resolve-task "$TASK2"
 
 ```text
 [...]
-Run run-80a8d717fe444f39a2f7e30918c12ea9 (running) -- step 'implementation' via skill 'implementation'
+Run run-bd1c636e5b9141458a7c6b55e3834ecf (running) -- step 'implementation' via skill 'skillflow:implementation'
 Execution: model: sonnet, effort: high
 Context:
-  - requirements.md (requirements v1)
   - plan.md (plan v1)
   - review.md (review v1)
 Expected outputs: none declared
@@ -293,7 +294,7 @@ with contextlib.closing(store.open_store(ws)) as conn:
     print(create_task(conn, title='Decision demo', workflow_definition_id='software-change').id)
 ")
 skillflow resolve-task "$TASK3" >/dev/null
-skillflow complete-run --outcome ready --artifact requirements.md:requirements:requirements.md >/dev/null
+skillflow complete-run --outcome ready --artifact research.md:research:research.md >/dev/null
 skillflow resolve-task "$TASK3" >/dev/null
 skillflow complete-run --outcome ready --artifact plan.md:plan:plan.md >/dev/null
 skillflow resolve-task "$TASK3" >/dev/null
@@ -315,7 +316,7 @@ Human decision required.
 Use:
 
 /skillflow:decide <decision>
-skillflow resolve-task: HumanDecisionRequired: task 'task-cc8a62158265428f8434f67ddec471c8' is 'waiting_for_human'; record a decision with `skillflow decide <decision>`, then run `skillflow resolve-task task-cc8a62158265428f8434f67ddec471c8`
+skillflow resolve-task: HumanDecisionRequired: task 'task-54ecbb15ab874aee88859dd477483539' is 'waiting_for_human'; record a decision with `skillflow decide <decision>`, then run `skillflow resolve-task task-54ecbb15ab874aee88859dd477483539`
 No Run was created.
 exit: 1
 ```
@@ -379,18 +380,18 @@ skillflow resolve-task "$TASK4"
 ```
 
 ```text
-Run run-a925bd0184354ea8b0f5dba17ecc6252 failed.
+Run run-ed789fc5e1ef4c1088210aaad88191c1 failed.
 
 Task status:
 active
 
-Diagnostics: runs/run-a925bd0184354ea8b0f5dba17ecc6252/output.log
+Diagnostics: runs/run-ed789fc5e1ef4c1088210aaad88191c1/output.log
 
 Next action:
-Run requirements.
+Run research.
 [...]
-Task task-0e586e62a1714df5ac99435711eca90d: Branch 4
-Run run-c8591f6714bf437e8c81866b062fa824 (running) -- step 'requirements' via skill 'requirements-analysis'
+Task task-0c4415abcb99407ca7e06ff7941bea91: Failure demo
+Run run-04e434a1d082483a96d290ce3006a429 (running) -- step 'research' via skill 'skillflow:research'
 ```
 
 The failed Run is never resumed; the retry is a new Run, and the
@@ -401,7 +402,7 @@ cat .skillflow/runs/*/output.log
 ```
 
 Complete the retried Run normally (`--outcome ready` plus the
-requirements artifact routes to decomposition) and continue exactly
+research artifact routes to decomposition) and continue exactly
 like the happy path from there.
 
 ## 5. Workflow selection
@@ -423,11 +424,11 @@ skillflow resolve-task "$TASK5" --workflow software-change
 ```
 
 ```text
-skillflow resolve-task: WorkflowSelectionRequired: task 'task-5ce5ed277c4741f48a30ab97b60b468e' has no Workflow Definition and none was given; SkillFlow never selects one. available Workflow Definitions: 'software-change'; re-run as `skillflow resolve-task task-5ce5ed277c4741f48a30ab97b60b468e --workflow NAME`
+skillflow resolve-task: WorkflowSelectionRequired: task 'task-2ec04ec7382348a2b845c648fdf83f03' has no Workflow Definition and none was given; SkillFlow never selects one. available Workflow Definitions: 'software-change'; re-run as `skillflow resolve-task task-2ec04ec7382348a2b845c648fdf83f03 --workflow NAME`
 No Run was created.
 exit: 1
-Task task-5ce5ed277c4741f48a30ab97b60b468e: Unassigned
-Run run-21782e1e6a204495890adc1116f34206 (running) -- step 'requirements' via skill 'requirements-analysis'
+Task task-2ec04ec7382348a2b845c648fdf83f03: Unassigned
+Run run-8938f82c939845b3850798a0bf820c11 (running) -- step 'research' via skill 'skillflow:research'
 ```
 
 Assignment is permanent; from here the Task behaves exactly like §1.

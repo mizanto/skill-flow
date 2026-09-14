@@ -262,48 +262,49 @@ software-change.yaml: steps[3].outcomes['approved']: OutcomeRule with action
 name: software-change
 
 steps:
-  - id: requirements          # A: initial step (Workflow.initial_step)
-    skill: requirements-analysis
+  - id: research              # A: initial step (Workflow.initial_step)
+    skill: skillflow:research
     model: opus
     effort: high
+    context: [review, plan, research]               # resolve only after review returns the Task here
     outputs:
-      - type: requirements
+      - type: research
         required: true
     outcomes:
-      ready: { action: run, step: decomposition }   # A: normal progression
+      ready:  { action: run, step: decomposition }   # A: normal progression
+      replan: { action: run, step: decomposition }   # C: redo the plan after research
 
   - id: decomposition
-    skill: decomposition
+    skill: skillflow:decomposition
     model: opus
     effort: high
-    context: [requirements, research]               # 'research' resolves only on a post-research re-decomposition (SF-32)
+    context: [research, review]                     # 'review' resolves only on a post-review re-decomposition
     outputs:
       - type: plan
         required: true
     outcomes:
       ready: { action: run, step: implementation }   # A
 
-  - id: implementation          # no outputs / no outcomes declared here
-    skill: implementation
+  - id: implementation          # no outputs declared here
+    skill: skillflow:implementation
     model: sonnet
     effort: high
-    context: [requirements, plan, review]           # 'review' resolves only on a rework Run
+    context: [plan, review]                         # 'review' resolves only on a rework Run
     outcomes:
       ready: { action: run, step: review }           # A
 
   - id: review
-    skill: code-review
+    skill: skillflow:code-review
     model: opus
     effort: high
-    context: [requirements, plan]
+    context: [research, plan]
     outputs:
       - type: review
         required: true
     outcomes:
       approved:                     { action: complete }                     # A: happy path
       changes_requested:            { action: run, step: implementation }     # B: review / rework
-      fundamental_assumption_wrong: { action: run, skill: research }          # C: skill target, not a step
-      replan:                       { action: run, step: decomposition }      # C: the skill Run's continuation edge (SF-32)
+      fundamental_assumption_wrong: { action: run, step: research }           # C: back to research
       human_required:               { action: human }                        # D: human decision
     decisions:
       approve:         { action: complete }                                  # D
@@ -317,5 +318,5 @@ steps:
 |----------|-----------------------------|
 | **A — happy path** | Each step's `ready` outcome is `run` to the next step; `review/approved` is `complete`. |
 | **B — review / rework** | `review/changes_requested` is `run` with `step: implementation`. No `Rework` / `Loop` entity. |
-| **C — fundamental assumption wrong** | `review/fundamental_assumption_wrong` is `run` with `skill: research` (`step` is `None`); `research` is not a step and is not validated. `review/replan` is `run` with `step: decomposition` — the skill Run's continuation edge (SF-32); `decomposition` consumes `research`. |
+| **C — fundamental assumption wrong** | `review/fundamental_assumption_wrong` is `run` with `step: research`, an ordinary rule targeting an earlier step. The research step consumes `review`, `plan` and earlier `research`; its `replan` outcome is `run` with `step: decomposition`. A rule may still target a `skill` that is not a step (SF-A-4 §9); such a target is never validated against the step list. |
 | **D — human decision** | `review/human_required` is `human`; then `decisions` maps `approve → complete`, `request_changes → run/implementation`, `cancel → cancel`. A decision never maps back to `human`. |

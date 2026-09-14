@@ -131,14 +131,14 @@ Task
 The first reference workflow is a software-change lifecycle:
 
 ```text
-Requirements
+Research
 → Decomposition
 → Implementation
 → Review
 → Done
 ```
 
-It also supports review-driven rework, research when a fundamental assumption is wrong, and human decisions.
+It also supports review-driven rework, a return to research when a fundamental assumption is wrong, and human decisions.
 
 The reference definition ships at [`workflows/software-change.yaml`](workflows/software-change.yaml).
 

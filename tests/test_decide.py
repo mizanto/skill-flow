@@ -1,8 +1,8 @@
 """Tests for ``skillflow.decide`` (SF-27).
 
 Following ``test_complete_run.py``'s shape: a ``tmp_path`` workspace fixture
-with a ``.git`` marker, ``store.open_store``, and the **real**
-``workflows/software-change.yaml`` copied into ``<root>/workflows/``. Tasks
+with a ``.git`` marker, ``store.open_store``, and the frozen
+``runtime-reference/software-change.yaml`` copied into ``<root>/workflows/``. Tasks
 are parked in ``waiting_for_human`` with the real ``resolve_task(...)`` /
 ``complete_run(...)`` wherever the run history matters, and parked directly
 via ``store.update_task`` where only the Task row matters (resolution and
@@ -59,7 +59,13 @@ from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 @pytest.fixture

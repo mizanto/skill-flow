@@ -1,8 +1,8 @@
 """Tests for ``skillflow.show_task`` (SF-38).
 
 Following ``test_prepare_artifacts.py``'s shape: a ``tmp_path`` workspace
-fixture with a ``.git`` marker, ``store.open_store``, and the **real**
-``workflows/software-change.yaml`` copied into ``<root>/workflows/``. Runs
+fixture with a ``.git`` marker, ``store.open_store``, and the frozen
+``runtime-reference/software-change.yaml`` copied into ``<root>/workflows/``. Runs
 are driven into existence with the real ``resolve_task(...)`` wherever
 possible, so the view is exercised against state the system produces;
 raw ``store.insert_*`` calls build the states the service layer cannot
@@ -46,7 +46,13 @@ from skillflow.show_task import RunView, ShowTaskError, TaskView
 from skillflow.show_task import show_task as show
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 @pytest.fixture

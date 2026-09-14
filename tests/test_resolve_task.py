@@ -1,8 +1,8 @@
 """Tests for ``skillflow.resolve_task`` (SF-20).
 
 Following ``test_service.py``'s shape: a ``tmp_path`` workspace fixture with
-a ``.git`` marker, ``store.open_store``, and the **real**
-``workflows/software-change.yaml`` copied into ``<root>/workflows/``.
+a ``.git`` marker, ``store.open_store``, and the frozen
+``runtime-reference/software-change.yaml`` copied into ``<root>/workflows/``.
 
 * **Contract change-detectors** -- the public surface, ``ResolveTaskError``
   (type and ``code`` attribute), and the AST import boundary (no Claude Code
@@ -47,7 +47,13 @@ from skillflow.service import (
 from skillflow.workflow import ActionType, Workflow, WorkflowStep
 from skillflow.workflow_loader import WorkflowLoadError, load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 @pytest.fixture

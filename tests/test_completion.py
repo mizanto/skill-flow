@@ -8,7 +8,7 @@ Two kinds of test, following ``test_outputs.py`` / ``test_evaluator.py``:
   "invalid outcomes do not mutate the Run": the module *cannot* write), the
   single-exception-class shape, and the reuse of ``domain.Outcome``.
 * **Behaviour tests** -- valid completion requests (including every key of
-  the real ``review`` step from ``workflows/software-change.yaml``) and
+  the ``review`` step of ``runtime-reference/software-change.yaml``) and
   invalid ones (each proving its rejection code), plus determinism and the
   no-mutation guarantee.
 """
@@ -40,7 +40,13 @@ from skillflow.evaluator import EvaluationInput, evaluate
 from skillflow.workflow import ActionType, OutcomeRule, WorkflowStep
 from skillflow.workflow_loader import load_workflow
 
-REFERENCE = Path(__file__).resolve().parents[1] / "workflows" / "software-change.yaml"
+REFERENCE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "workflows"
+    / "runtime-reference"
+    / "software-change.yaml"
+)
 
 
 def _step(**over):
