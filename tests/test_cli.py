@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+import skillflow
 from skillflow import __version__, store, workspace
 from skillflow.artifacts import create_artifact
 from skillflow.cli import (
+    _bundled_workflows_dir,
     format_artifact_report,
     format_completion,
     format_decision,
@@ -2471,3 +2473,188 @@ def test_resolve_task_stored_path_escape_keeps_a_truthful_sentence(
     assert f"Run {runs[-1].id!r} was created" in captured.err
     assert "No Run was created." not in captured.err
     assert f"`skillflow show-task {task.id}`" in captured.err
+
+
+# --- start (SF-45) ----------------------------------------------------------
+
+
+@pytest.fixture
+def start_repo(tmp_path, monkeypatch):
+    # Unlike cli_ws, the workspace must NOT be pre-initialised: start
+    # owns init_workspace itself.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def bundled_defs(monkeypatch):
+    # Hermetic: never depend on the checkout's root workflows/ or install
+    # layout.
+    monkeypatch.setenv("SKILLFLOW_BUNDLED_WORKFLOWS", str(REFERENCE.parent))
+
+
+def test_start_in_empty_git_repo_creates_active_task(start_repo, bundled_defs, capsys):
+    assert main(["start", "--title", "Ship it"]) == 0
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert len(lines) == 1
+    task_id = lines[0]
+
+    ws = workspace.Workspace(root=start_repo)
+    assert ws.db_path.is_file()
+    with contextlib.closing(store.open_store(ws)) as conn:
+        task = store.get_task(conn, task_id)
+        assert task is not None
+        assert task.status is TaskStatus.ACTIVE
+        assert task.title == "Ship it"
+        assert task.description == ""
+        assert task.workflow_definition_id == "software-change"
+        assert store.get_workflow_definition(conn, "software-change") is not None
+    assert (start_repo / "workflows" / "software-change.yaml").read_bytes() == (
+        REFERENCE.read_bytes()
+    )
+
+
+def test_start_twice_creates_second_task_and_leaves_yaml_untouched(
+    start_repo, bundled_defs, capsys
+):
+    assert main(["start", "--title", "First"]) == 0
+    first_id = capsys.readouterr().out.splitlines()[0]
+
+    pinned = start_repo / "workflows" / "software-change.yaml"
+    with pinned.open("a", encoding="utf-8") as handle:
+        handle.write("# pinned\n")
+
+    assert main(["start", "--title", "Second"]) == 0
+    second_id = capsys.readouterr().out.splitlines()[0]
+
+    assert first_id != second_id
+    assert "# pinned" in pinned.read_text(encoding="utf-8")
+
+    ws = workspace.Workspace(root=start_repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        assert len(store.list_tasks_by_status(conn, TaskStatus.ACTIVE)) == 2
+
+
+def test_start_unknown_workflow_rejects_without_task(start_repo, bundled_defs, capsys):
+    assert main(["start", "--title", "T", "--workflow", "nope"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow start: WorkflowLoadError: ")
+    assert lines[-1] == "No Task was created."
+    assert not (start_repo / "workflows" / "nope.yaml").exists()
+    assert (start_repo / ".skillflow").is_dir()
+
+    ws = workspace.Workspace(root=start_repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        assert store.list_tasks_by_status(conn, TaskStatus.ACTIVE) == []
+
+
+def test_start_missing_title_exits_two(start_repo, bundled_defs):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["start"])
+    assert exc_info.value.code == 2
+
+
+def test_start_blank_title_exits_two(start_repo, bundled_defs):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["start", "--title", "  "])
+    assert exc_info.value.code == 2
+
+
+def test_start_respects_prepinned_yaml_without_bundled(
+    start_repo, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("SKILLFLOW_BUNDLED_WORKFLOWS", str(tmp_path / "empty-bundled"))
+    pinned = start_repo / "workflows"
+    pinned.mkdir()
+    (pinned / "software-change.yaml").write_bytes(REFERENCE.read_bytes())
+
+    assert main(["start", "--title", "Pinned"]) == 0
+
+    captured = capsys.readouterr()
+    assert len(captured.out.splitlines()) == 1
+    assert (pinned / "software-change.yaml").read_bytes() == REFERENCE.read_bytes()
+
+
+def test_start_with_description_and_workflow_flag(start_repo, bundled_defs, capsys):
+    assert (
+        main(
+            [
+                "start",
+                "--title",
+                "Described",
+                "--description",
+                "Why this exists",
+                "--workflow",
+                "software-change",
+            ]
+        )
+        == 0
+    )
+
+    task_id = capsys.readouterr().out.splitlines()[0]
+    ws = workspace.Workspace(root=start_repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        task = store.get_task(conn, task_id)
+        assert task is not None
+        assert task.description == "Why this exists"
+        assert task.workflow_definition_id == "software-change"
+
+
+def test_bundled_dir_prefers_env_then_package_fallback(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKILLFLOW_BUNDLED_WORKFLOWS", raising=False)
+    fallback = Path(skillflow.__file__).resolve().parents[2] / "workflows"
+    assert _bundled_workflows_dir() == fallback
+    monkeypatch.setenv("SKILLFLOW_BUNDLED_WORKFLOWS", "")
+    assert _bundled_workflows_dir() == fallback
+    monkeypatch.setenv("SKILLFLOW_BUNDLED_WORKFLOWS", str(tmp_path))
+    assert _bundled_workflows_dir() == tmp_path
+
+
+def test_start_outside_repo_rejects(tmp_path, monkeypatch, capsys):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+
+    assert main(["start", "--title", "Lost"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines()[0].startswith(
+        "skillflow start: RepositoryRootNotFoundError: "
+    )
+
+
+@pytest.mark.parametrize("workflow_id", ["../evil", ""])
+def test_start_hostile_workflow_id_rejects_without_side_effects(
+    start_repo, tmp_path_factory, monkeypatch, capsys, workflow_id
+):
+    # The escape target lives outside the repo on purpose and exists:
+    # a naive path-join staging would copy it to the repo root before
+    # the loader rejects the id, so only the side-effect assertions
+    # below discriminate the workflow_path guard (exit code and
+    # envelope are identical either way).
+    outside = tmp_path_factory.mktemp("bundled-outer")
+    bundled = outside / "bundled"
+    bundled.mkdir()
+    (outside / "evil.yaml").write_text("name: evil\n", encoding="utf-8")
+    monkeypatch.setenv("SKILLFLOW_BUNDLED_WORKFLOWS", str(bundled))
+
+    assert main(["start", "--title", "T", "--workflow", workflow_id]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow start: WorkflowLoadError: ")
+    assert lines[-1] == "No Task was created."
+    assert list(start_repo.glob("*.yaml")) == []
+    assert not (start_repo / "workflows").exists()
+
+    ws = workspace.Workspace(root=start_repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        assert store.list_tasks_by_status(conn, TaskStatus.ACTIVE) == []

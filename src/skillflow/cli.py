@@ -2,8 +2,9 @@
 
 ``--version`` / ``--help`` plus the lifecycle subcommands (``resolve-task``,
 ``prepare-artifacts``, ``complete-run``, ``decide``, the ``fail-run``
-operator command, the read-only ``show-task`` debug command and the
-read-only ``assignment`` lookup).
+operator command, the read-only ``show-task`` debug command, the
+read-only ``assignment`` lookup, and the ``start`` operator command that
+creates a Task).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition/input rejection
 (the message goes to stderr), ``2`` for usage errors (argparse's own).
@@ -13,10 +14,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sqlite3
 import sys
 from pathlib import Path, PureWindowsPath
 
+import skillflow
 from skillflow import __version__, service, store, workspace
 from skillflow.artifacts import ArtifactStorageError, content_path
 from skillflow.assignment import AssignmentError, resolve_assignment
@@ -40,8 +43,12 @@ from skillflow.resolve_task import ResolveTaskError, resolve_task
 from skillflow.run_input import RunInput
 from skillflow.show_task import RunView, ShowTaskError, TaskView, show_task
 from skillflow.workflow import ActionType
-from skillflow.workflow_loader import WorkflowLoadError
-from skillflow.workspace import WorkspaceError
+from skillflow.workflow_loader import (
+    WorkflowLoadError,
+    load_definition,
+    workflow_path,
+)
+from skillflow.workspace import WorkspaceError, WorkspaceLayoutError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,6 +176,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--skill",
         default=None,
         help="Verify the running Run targets this skill; exit 1 otherwise.",
+    )
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Create a Task from a bundled Workflow Definition.",
+    )
+    start_parser.add_argument(
+        "--title",
+        required=True,
+        type=_non_blank_title,
+        help="Task title (must be a non-empty string).",
+    )
+    start_parser.add_argument(
+        "--description",
+        default="",
+        help="Optional free-text Task description.",
+    )
+    start_parser.add_argument(
+        "--workflow",
+        default="software-change",
+        help="Workflow Definition id to assign (default: software-change).",
     )
     return parser
 
@@ -597,6 +624,7 @@ _UNCHANGED_STATE = {
     "fail-run": "No failure was recorded; no Run status was changed.",
     "show-task": "Nothing was changed: this command only inspects state.",
     "assignment": "Nothing was changed: this command only inspects state.",
+    "start": "No Task was created.",
 }
 
 
@@ -844,6 +872,20 @@ def _load_diagnostics(
             f"cannot read --diagnostics-file {diagnostics_file!r}: {exc}; "
             "fix the path, then re-run `skillflow fail-run ...`",
         ) from None
+
+
+def _non_blank_title(value: str) -> str:
+    """Validate the ``start --title`` argument.
+
+    Argparse ``type`` hook: a blank title is user input, not a domain
+    programming error, so it is excluded here (exit 2 with usage) rather
+    than reaching ``domain.Task`` as a ``ValueError`` traceback. The
+    surviving value is returned unchanged; the domain still strips it on
+    persist.
+    """
+    if not value.strip():
+        raise argparse.ArgumentTypeError("--title must be a non-empty string")
+    return value
 
 
 def _run_resolve_task(*, task_id: str | None, workflow: str | None) -> int:
@@ -1095,6 +1137,82 @@ def _run_assignment(*, skill: str | None) -> int:
     return 0
 
 
+def _bundled_workflows_dir() -> Path:
+    """Return the directory holding the bundled Workflow Definitions.
+
+    ``SKILLFLOW_BUNDLED_WORKFLOWS`` (exported by the SF-52 plugin shim)
+    wins when set and non-empty; otherwise fall back to the ``workflows/``
+    directory beside the installed package (the repository root in a
+    checkout). Pure path resolution: existence is checked by the caller,
+    so a misconfigured install surfaces as the actionable
+    unknown-workflow rejection, not here.
+    """
+    configured = os.environ.get("SKILLFLOW_BUNDLED_WORKFLOWS")
+    if configured:
+        return Path(configured)
+    return Path(skillflow.__file__).resolve().parents[2] / "workflows"
+
+
+def _stage_workflow_definition(
+    ws: workspace.Workspace, workflow_id: str, bundled_dir: Path
+) -> None:
+    """Pin the bundled definition for ``workflow_id`` into the repository.
+
+    A present ``<repo>/workflows/<id>.yaml`` — pinned earlier or
+    hand-written — is authoritative and never overwritten. Otherwise the
+    bundled file is copied byte-exact (creating ``workflows/`` when
+    needed). When neither copy exists, raise ``WorkflowLoadError``
+    before any database write, so the rejection carries the standard
+    envelope and no Task is created.
+    """
+    dest = workflow_path(ws.workflows_dir, workflow_id)
+    if dest.exists():
+        return
+    src = workflow_path(bundled_dir, workflow_id)
+    if not src.is_file():
+        raise WorkflowLoadError(
+            f"unknown workflow {workflow_id!r}: no {dest.name} in "
+            f"{ws.workflows_dir} and no bundled definition in {bundled_dir}; "
+            "pass --workflow with an id that has a bundled definition, "
+            "or place the definition file in the repository workflows/ "
+            "directory, then re-run `skillflow start`"
+        )
+    if dest.parent.exists() and not dest.parent.is_dir():
+        raise WorkspaceLayoutError(f"expected a directory, found a file: {dest.parent}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(src.read_bytes())
+
+
+def _run_start(*, title: str, description: str, workflow: str) -> int:
+    """Execute ``start``; return a process exit code."""
+    try:
+        ws = workspace.init_workspace()
+        _stage_workflow_definition(ws, workflow, _bundled_workflows_dir())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            definition = load_definition(ws.workflows_dir, workflow)
+            service.register_workflow(conn, definition)
+            task = service.create_task(
+                conn,
+                title=title,
+                description=description,
+                workflow_definition_id=workflow,
+            )
+    # Note: only the layers this command calls are caught.
+    # UnknownWorkflowError is unreachable (register_workflow commits the
+    # verified id before create_task reads it); LookupError/ValueError are
+    # deliberately not caught (a blank --title is excluded at argparse, so
+    # a ValueError here is a programming error and must traceback rather
+    # than masquerade as a lifecycle rejection).
+    except (
+        WorkflowLoadError,
+        WorkspaceError,
+    ) as exc:
+        print(format_error("start", exc), file=sys.stderr)
+        return 1
+    print(task.id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run SkillFlow.
 
@@ -1134,5 +1252,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_show_task(task_id=args.task_id)
     if args.command == "assignment":
         return _run_assignment(skill=args.skill)
+    if args.command == "start":
+        return _run_start(
+            title=args.title, description=args.description, workflow=args.workflow
+        )
     parser.print_help()
     return 0
