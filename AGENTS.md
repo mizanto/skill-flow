@@ -45,11 +45,13 @@ Run statuses:
 
 There is no `pending` Run state.
 
+Reachable Run statuses in v0 are `running`/`completed`/`failed` (`waiting_for_human` is a Task status; no v0 command parks or cancels a Run).
+
 A failed Run does not automatically fail its Task.
 
 A retry/continuation is a new Run. A Run is never resumed.
 
-Only one Run may be `running` for a Task.
+At most one Run may be `running` per workspace (SF-A-7 §13).
 
 Run provenance uses `triggered_by_run_id` and `trigger_reason`. The initial Run uses `trigger_reason: initial`.
 
@@ -158,16 +160,16 @@ Skill Flow-owned state lives under `.skillflow/` at the target repository root.
 
 ## Execution boundary
 
-Each Run is one independent Claude Code session in the MVP.
+Each Run executes in an isolated context: a `context: fork` Skill invocation or a new independent Claude Code session.
 
 Skill Flow does not automatically launch Claude Code.
 
-A completed Run must not continue into another Run in the same session.
+An Execution Skill must not continue into another Run; the driver Skill (`/skillflow:work`) may dispatch the next Run in the same session.
 
 Intended flow:
 
 ```text
-new Claude Code session
+isolated Run context (`context: fork` or new session)
   ↓
 /skillflow:resolve-task <task-id>
   ↓
@@ -184,7 +186,7 @@ Result + Lifecycle Evaluation
 next action
 ```
 
-The next Run is started in a new Claude Code session.
+The next Run is dispatched by the driver or started in a new session via `/skillflow:resolve-task <task-id>`.
 
 ## Public commands
 
@@ -208,7 +210,7 @@ Do not add `start-run`, `create-artifact`, `create-result`, `transition`, `next-
 - creates a `running` Run;
 - returns RunInput.
 
-It does not launch Claude Code.
+It does not launch Claude Code. It is the only Run creator in v0.
 
 ### `prepare-artifacts`
 

@@ -45,7 +45,7 @@ If specifications contradict each other, do not silently reinterpret the archite
 - Context Selection is deterministic in v0.
 - Workflow Definition is a definition, not a runtime instance.
 - Skill Flow does not automatically launch Claude Code.
-- The next Run is not created in the current Claude Code session.
+- Runs execute in isolated context: a `context: fork` Skill invocation or a new session. A driver Skill (`/skillflow:work`) may dispatch the next Run in the same session; an Execution Skill executes only its own Run.
 
 Do not introduce Router, Transition, Loop, Iteration, Rework, Handoff, Workflow Instance, or Stage as first-class concepts.
 
@@ -296,8 +296,8 @@ Do not invent additional lifecycle commands.
 When operating inside a Skill Flow Run:
 
 1. Resolve the Task before lifecycle work.
-2. Execute only the resolved Run.
-3. Do not start another Run in the same session.
+2. Execute only the resolved Run (Execution Skills never start another Run).
+3. Only the driver Skill (`/skillflow:work`) may dispatch the next Run in the same session.
 4. Use Skill Flow commands for lifecycle state changes.
 5. Use normal Claude Code tools for project work.
 6. Prepare durable artifacts before completing the Run.
@@ -313,7 +313,7 @@ Before completing a Run:
 
 must be used to verify expected durable outputs.
 
-`/skillflow:complete-run` performs final validation and lifecycle evaluation. It does not create or launch the next Run.
+`/skillflow:complete-run` performs final validation and lifecycle evaluation. It does not create or launch the next Run. `resolve-task` remains the only Run creator; at most one Run is `running` per workspace; reachable Run statuses are `running`/`completed`/`failed`.
 
 ## Durable context
 
