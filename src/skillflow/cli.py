@@ -2,7 +2,8 @@
 
 ``--version`` / ``--help`` plus the lifecycle subcommands (``resolve-task``,
 ``prepare-artifacts``, ``complete-run``, ``decide``, the ``fail-run``
-operator command and the read-only ``show-task`` debug command).
+operator command, the read-only ``show-task`` debug command and the
+read-only ``assignment`` lookup).
 
 Exit codes: ``0`` on success, ``1`` for a lifecycle/definition/input rejection
 (the message goes to stderr), ``2`` for usage errors (argparse's own).
@@ -17,7 +18,8 @@ import sys
 from pathlib import Path, PureWindowsPath
 
 from skillflow import __version__, service, store, workspace
-from skillflow.artifacts import ArtifactStorageError
+from skillflow.artifacts import ArtifactStorageError, content_path
+from skillflow.assignment import AssignmentError, resolve_assignment
 from skillflow.complete_run import CompleteRunError, RunCompletion, complete_run
 from skillflow.completion import (
     ArtifactSubmission,
@@ -26,7 +28,7 @@ from skillflow.completion import (
 )
 from skillflow.decide import DecideError, DecisionRecord, decide
 from skillflow.decisions import DecisionError, DecisionRequest
-from skillflow.domain import LifecycleEvent, Run, RunStatus
+from skillflow.domain import Artifact, LifecycleEvent, Run, RunStatus
 from skillflow.evaluator import EvaluationError, WorkflowSelectionRequiredError
 from skillflow.fail_run import FailRunError, FailureRequest, RunFailure, fail_run
 from skillflow.prepare_artifacts import (
@@ -159,22 +161,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show a Task's lifecycle: runs, results, artifacts, decisions, events.",
     )
     show_parser.add_argument("task_id", help="The Task to inspect.")
+    assignment_parser = subparsers.add_parser(
+        "assignment",
+        help="Print the running Run's Assignment (its rebuilt RunInput).",
+    )
+    assignment_parser.add_argument(
+        "--skill",
+        default=None,
+        help="Verify the running Run targets this skill; exit 1 otherwise.",
+    )
     return parser
 
 
-def format_run_input(run_input: RunInput) -> str:
+def _artifact_relpath(ws: workspace.Workspace, artifact: Artifact) -> str:
+    """Return ``artifact``'s content path, relative to the repository root.
+
+    ``artifacts.content_path`` resolves the absolute store path (and refuses
+    a stored path escaping the store); relativising to the workspace root
+    keeps the printed value portable between checkouts
+    (``.skillflow/artifacts/<task>/<file>``), and ``as_posix`` keeps it
+    stable on Windows. Pure path derivation: the file is never read, so a
+    missing file still prints -- printing is not verification.
+    """
+    return content_path(ws, artifact).relative_to(ws.root).as_posix()
+
+
+def format_run_input(
+    run_input: RunInput, ws: workspace.Workspace, workflow_definition_id: str
+) -> str:
     """Render a ``RunInput`` as human-readable text.
 
     Pure formatting: Task id/title/description (the description is omitted
     when empty -- it defaults to ``""``), Run id and ``running`` status,
-    step id/skill/model/effort, the selected context artifacts (name, type,
-    version) with unresolved declared types as an informational line, the
+    the Workflow Definition id, step id/skill/model/effort, the selected
+    context artifacts (name, type, version, plus the repo-relative content
+    path) with unresolved declared types as an informational line, the
     expected outputs with ``required`` flags, and a closing block naming the
     next command. A skill-targeted Run (``step_id`` ``None``, SF-32) prints
     a skill-forward header with no step line and closes with the
     ``/skillflow:complete-run`` pointer -- it declares no outputs for
     ``/skillflow:prepare-artifacts`` to inspect. No lifecycle state is
-    re-derived here.
+    re-derived here. Both ``resolve-task`` and ``assignment`` render through
+    this one formatter, so a rebuilt Assignment prints exactly what creation
+    printed (SF-44).
     """
     if run_input.step_id is None:
         run_line = (
@@ -189,6 +218,7 @@ def format_run_input(run_input: RunInput) -> str:
     lines = [
         f"Task {run_input.task_id}: {run_input.task_title}",
         run_line,
+        f"Workflow: {workflow_definition_id}",
     ]
     if run_input.task_description:
         lines.append(f"Description: {run_input.task_description}")
@@ -204,21 +234,20 @@ def format_run_input(run_input: RunInput) -> str:
         lines.append("Context:")
         for artifact in selected:
             lines.append(
-                f"  - {artifact.name} ({artifact.type} v{artifact.version})"
+                f"  - {artifact.name} ({artifact.type} v{artifact.version}): "
+                f"{_artifact_relpath(ws, artifact)}"
             )
     else:
         lines.append("Context: none selected")
     if run_input.context.unresolved:
         lines.append(
-            "Unresolved context types: "
-            + ", ".join(run_input.context.unresolved)
+            "Unresolved context types: " + ", ".join(run_input.context.unresolved)
         )
     if run_input.outputs:
         lines.append("Expected outputs:")
         for output in run_input.outputs:
             lines.append(
-                f"  - {output.type} "
-                f"({'required' if output.required else 'optional'})"
+                f"  - {output.type} ({'required' if output.required else 'optional'})"
             )
     else:
         lines.append("Expected outputs: none declared")
@@ -553,7 +582,9 @@ def _format_event(event: LifecycleEvent) -> str:
 #: Unchanged-state sentence appended to every rejection of each command
 #: (SF-37). Each sentence is true on EVERY exit-1 path of its command:
 #: ``resolve-task`` rejects only before Run creation (step 9), so it claims
-#: just that -- a step-4 ``--workflow`` assignment may persist;
+#: just that -- a step-4 ``--workflow`` assignment may persist -- except
+#: its post-commit format stage (SF-44), which carries its own truthful
+#: sentence because the Run was created;
 #: ``prepare-artifacts`` never writes; ``complete-run``/``decide``/
 #: ``fail-run`` reject before their single write block or roll it back
 #: (SF-36). The mutating commands' sentences presuppose no identified
@@ -565,6 +596,7 @@ _UNCHANGED_STATE = {
     "decide": "No decision was recorded; no Task status was changed.",
     "fail-run": "No failure was recorded; no Run status was changed.",
     "show-task": "Nothing was changed: this command only inspects state.",
+    "assignment": "Nothing was changed: this command only inspects state.",
 }
 
 
@@ -820,6 +852,10 @@ def _run_resolve_task(*, task_id: str | None, workflow: str | None) -> int:
         ws = workspace.Workspace(root=workspace.find_repo_root())
         with contextlib.closing(store.open_store(ws)) as conn:
             result = resolve_task(conn, ws, task_id=task_id, workflow=workflow)
+            # The formatter's Workflow line: set by step 4 before any Run is
+            # created, so a successful resolve always has one; the Task
+            # exists (step 1) and the Run just created is its proof.
+            task = store.get_task(conn, result.task_id)
     # Note: LookupError (the service layer's missing-entity convention) is
     # deliberately not caught: resolve_task establishes Task existence at
     # step 1, so every LookupError path in service.py is unreachable from
@@ -838,7 +874,24 @@ def _run_resolve_task(*, task_id: str | None, workflow: str | None) -> int:
     ) as exc:
         print(format_error("resolve-task", exc), file=sys.stderr)
         return 1
-    print(format_run_input(result))
+    # Formatting is its own stage, after the commit: since SF-44 it resolves
+    # each selected artifact's content path, and a stored path escaping the
+    # store (raw SQL only -- every writer builds versioned filenames) is a
+    # rejection, not a traceback. It cannot use format_error: the Run WAS
+    # created, so "No Run was created." would be false (SF-37's invariant).
+    try:
+        output = format_run_input(result, ws, task.workflow_definition_id)
+    except ArtifactStorageError as exc:
+        print(
+            f"skillflow resolve-task: ArtifactStorageError: {exc}\n"
+            f"Run {result.run_id!r} was created, but its Assignment could "
+            "not be printed; inspect the stored paths with "
+            f"`skillflow show-task {result.task_id}`, fix the rows, then run "
+            "`skillflow assignment`",
+            file=sys.stderr,
+        )
+        return 1
+    print(output)
     return 0
 
 
@@ -1008,6 +1061,40 @@ def _run_show_task(*, task_id: str) -> int:
     return 0
 
 
+def _run_assignment(*, skill: str | None) -> int:
+    """Execute ``assignment``; return a process exit code."""
+    try:
+        ws = workspace.Workspace(root=workspace.find_repo_root())
+        with contextlib.closing(store.open_store(ws)) as conn:
+            result = resolve_assignment(conn, ws, expected_skill=skill)
+            run = store.get_run(conn, result.run_id)
+        # The Run exists -- resolve_assignment just rebuilt this input from
+        # it -- and names the Workflow Definition the Workflow line prints
+        # (a missing one rejects as StepUnresolved inside the operation).
+        # Formatting stays inside the try: it resolves each selected
+        # artifact's content path, and a stored path escaping the store is
+        # a rejection, not a traceback. The unchanged-state sentence stays
+        # true here -- unlike resolve-task, nothing was written.
+        output = format_run_input(result, ws, run.workflow_definition_id)
+    # Note: only the layers this command calls are caught. assignment
+    # performs deterministic reads -- it never writes, evaluates the
+    # lifecycle, or creates a Run, so the invariant, evaluation, and
+    # service classes its siblings list are unreachable here and would be
+    # dead code. LookupError is deliberately not caught either: the Task
+    # is FK-guaranteed behind the resolved Run, and a programming error
+    # must traceback rather than masquerade as a lifecycle rejection.
+    except (
+        AssignmentError,
+        WorkflowLoadError,
+        WorkspaceError,
+        ArtifactStorageError,
+    ) as exc:
+        print(format_error("assignment", exc), file=sys.stderr)
+        return 1
+    print(output)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run SkillFlow.
 
@@ -1045,5 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "show-task":
         return _run_show_task(task_id=args.task_id)
+    if args.command == "assignment":
+        return _run_assignment(skill=args.skill)
     parser.print_help()
     return 0

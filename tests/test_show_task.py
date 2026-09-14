@@ -253,9 +253,11 @@ def test_module_imports_are_within_the_boundary():
             modules.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module.split(".")[0])
-    assert modules <= {"sqlite3", "dataclasses", "skillflow"}, (
-        f"unexpected imports: {modules}"
-    )
+    assert modules <= {
+        "sqlite3",
+        "dataclasses",
+        "skillflow",
+    }, f"unexpected imports: {modules}"
     for forbidden in (
         "subprocess",
         "os",

@@ -77,6 +77,7 @@ from uuid import uuid4
 
 from skillflow import store
 from skillflow.artifacts import register_artifact, write_diagnostics
+from skillflow.assignment import created_skill
 from skillflow.completion import ArtifactSubmission
 from skillflow.domain import (
     Artifact,
@@ -267,25 +268,6 @@ def _resolve_current_run(conn: sqlite3.Connection, task_id: str | None) -> Run:
     return run
 
 
-def _created_skill(conn: sqlite3.Connection, run: Run) -> str | None:
-    """Return the skill of skill-targeted ``run`` from its ``run.created`` event.
-
-    ``create_run`` records the action's skill in the payload because the
-    ``Run`` row has no skill column; the first event in ``(created_at, id)``
-    order wins, so the lookup is deterministic. ``None`` when no
-    ``run.created`` event for the Run carries one. Reads only.
-    """
-    for event in store.list_lifecycle_events_for_task(conn, run.task_id):
-        if (
-            event.run_id == run.id
-            and event.type is LifecycleEventType.RUN_CREATED
-            and event.payload is not None
-            and event.payload.get("skill")
-        ):
-            return event.payload["skill"]
-    return None
-
-
 def fail_run(
     conn: sqlite3.Connection,
     workspace: Workspace,
@@ -319,8 +301,9 @@ def fail_run(
 
     if run.step_id is None:
         # A skill-targeted Run (SF-A-4 §9): the retry re-issues the recorded
-        # skill, resolved from the Run's own `run.created` payload.
-        skill = _created_skill(conn, run)
+        # skill, resolved from the Run's own `run.created` payload -- the
+        # one shared lookup (SF-44).
+        skill = created_skill(conn, run)
         if skill is None:
             raise FailRunError(
                 "StepUnresolved",

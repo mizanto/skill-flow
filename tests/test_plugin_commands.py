@@ -101,9 +101,9 @@ def test_frontmatter_schema(name):
         f"{name}: unexpected frontmatter keys "
         f"{sorted(set(frontmatter) - ALLOWED_FRONTMATTER_KEYS)}"
     )
-    assert frontmatter.get("allowed-tools") == "Bash(skillflow:*)", (
-        f"{name}: unexpected tool grant {frontmatter.get('allowed-tools')!r}"
-    )
+    assert (
+        frontmatter.get("allowed-tools") == "Bash(skillflow:*)"
+    ), f"{name}: unexpected tool grant {frontmatter.get('allowed-tools')!r}"
 
 
 @pytest.mark.parametrize(
@@ -138,9 +138,9 @@ def test_argument_substitution_only_where_the_user_passes_arguments(name, expect
 def test_skill_invokes_exactly_its_own_runtime_operation(name):
     _, text = _read_command(name)
     found = SUBCOMMAND_PATTERN.findall(text)
-    assert found == [name], (
-        f"{name}: expected exactly one `skillflow {name}` invocation, found {found}"
-    )
+    assert found == [
+        name
+    ], f"{name}: expected exactly one `skillflow {name}` invocation, found {found}"
 
 
 @pytest.mark.parametrize(
@@ -185,6 +185,6 @@ def test_no_shell_execution_directives(name):
 def test_prerequisite_and_working_directory_noted(name):
     _, text = _read_command(name)
     assert "skillflow --version" in text, f"{name}: missing CLI prerequisite"
-    assert "inside the target repository" in text, (
-        f"{name}: missing working-directory rule"
-    )
+    assert (
+        "inside the target repository" in text
+    ), f"{name}: missing working-directory rule"

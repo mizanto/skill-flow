@@ -106,7 +106,9 @@ def _seed_task(cli_conn, *, title="Ship it", description="", workflow_id=None):
     if workflow_id is not None:
         register_workflow(cli_conn, load_workflow(REFERENCE))
     return create_task(
-        cli_conn, title=title, description=description,
+        cli_conn,
+        title=title,
+        description=description,
         workflow_definition_id=workflow_id,
     )
 
@@ -179,6 +181,7 @@ def test_resolve_task_success_prints_run_input(cli_conn, capsys):
     assert "Users need CSV export from the reports page." in out
     assert "requirements" in out
     assert "requirements-analysis" in out
+    assert "Workflow: software-change" in out
     assert "requirements (required)" in out
     assert "/skillflow:prepare-artifacts" in out
 
@@ -189,9 +192,7 @@ def test_resolve_task_with_workflow_assigns_and_resolves(cli_conn, capsys):
     assert main(["resolve-task", task.id, "--workflow", "software-change"]) == 0
 
     assert "requirements" in capsys.readouterr().out
-    assert (
-        store.get_task(cli_conn, task.id).workflow_definition_id == "software-change"
-    )
+    assert store.get_task(cli_conn, task.id).workflow_definition_id == "software-change"
 
 
 def test_resolve_task_unknown_task_exits_one_with_stderr_only(cli_conn, capsys):
@@ -262,20 +263,23 @@ def _task_and_run(*, step_id="implementation"):
     return task, run
 
 
-def test_format_renders_unresolved_context_as_informational():
+def test_format_renders_unresolved_context_as_informational(tmp_path):
     task, run = _task_and_run()
     step = load_workflow(REFERENCE).find_step("implementation")
     assert step is not None
     rendered = format_run_input(
-        resolve_run_input(task=task, run=run, step=step, artifacts=[])
+        resolve_run_input(task=task, run=run, step=step, artifacts=[]),
+        workspace.Workspace(root=tmp_path),
+        "software-change",
     )
 
     assert "Description: Do the thing." in rendered
+    assert "Workflow: software-change" in rendered
     assert "Context: none selected" in rendered
     assert "Unresolved context types: requirements, plan, review" in rendered
 
 
-def test_format_omits_empty_description():
+def test_format_omits_empty_description(tmp_path):
     now = datetime.now(UTC)
     task = Task(
         id="task-1",
@@ -297,13 +301,15 @@ def test_format_omits_empty_description():
     )
     step = WorkflowStep(id="s", skill="do-it")
     rendered = format_run_input(
-        resolve_run_input(task=task, run=run, step=step, artifacts=[])
+        resolve_run_input(task=task, run=run, step=step, artifacts=[]),
+        workspace.Workspace(root=tmp_path),
+        "software-change",
     )
 
     assert "Description:" not in rendered
 
 
-def test_format_marks_optional_outputs():
+def test_format_marks_optional_outputs(tmp_path):
     task, run = _task_and_run(step_id="s")
     step = WorkflowStep(
         id="s",
@@ -323,28 +329,34 @@ def test_format_marks_optional_outputs():
             skill=step.skill,
             outputs=step.outputs,
             context=ContextSelection(),
-        )
+        ),
+        workspace.Workspace(root=tmp_path),
+        "software-change",
     )
 
     assert "a (required)" in rendered
     assert "b (optional)" in rendered
 
 
-def test_format_omits_absent_model_and_effort():
+def test_format_omits_absent_model_and_effort(tmp_path):
     task, run = _task_and_run(step_id="s")
     step = WorkflowStep(id="s", skill="do-it")
     rendered = format_run_input(
-        resolve_run_input(task=task, run=run, step=step, artifacts=[])
+        resolve_run_input(task=task, run=run, step=step, artifacts=[]),
+        workspace.Workspace(root=tmp_path),
+        "software-change",
     )
 
     assert "Execution:" not in rendered
     assert "Expected outputs: none declared" in rendered
 
 
-def test_format_renders_skill_run_without_a_step_line():
+def test_format_renders_skill_run_without_a_step_line(tmp_path):
     task, run = _task_and_run(step_id=None)
     rendered = format_run_input(
-        resolve_skill_run_input(task=task, run=run, skill="research", artifacts=[])
+        resolve_skill_run_input(task=task, run=run, skill="research", artifacts=[]),
+        workspace.Workspace(root=tmp_path),
+        "software-change",
     )
 
     assert "Run run-1 (running) -- skill 'research' (no workflow step)" in rendered
@@ -2209,3 +2221,253 @@ def test_show_task_task_without_events_renders_empty_sections(cli_conn, capsys):
     assert "Workflow: none assigned" in captured.out
     assert "Runs: none" in captured.out
     assert "Events: none recorded" in captured.out
+
+
+# --- assignment (SF-44) ---------------------------------------------------------
+
+
+def test_assignment_after_resolve_prints_identical_output(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    capsys.readouterr()
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert main(["resolve-task", task.id]) == 0
+    resolved = capsys.readouterr().out
+
+    assert main(["assignment"]) == 0
+    assigned = capsys.readouterr().out
+
+    assert "requirements.md (requirements v1): " in resolved
+    assert assigned == resolved
+
+
+def test_assignment_prints_paths_holding_version_content(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    first = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    create_artifact(
+        cli_conn,
+        cli_ws,
+        run_id=first.id,
+        name="requirements.md",
+        type="requirements",
+        content="the v2 requirements",
+    )
+    assert main(["resolve-task", task.id]) == 0
+    capsys.readouterr()
+
+    assert main(["assignment"]) == 0
+
+    out = capsys.readouterr().out
+    expected = f".skillflow/artifacts/{task.id}/requirements-v2.md"
+    assert f"  - requirements.md (requirements v2): {expected}" in out
+    v2_file = cli_ws.root / expected
+    assert v2_file.read_text(encoding="utf-8") == "the v2 requirements"
+    v1_file = cli_ws.root / f".skillflow/artifacts/{task.id}/requirements-v1.md"
+    assert v1_file.read_text(encoding="utf-8") == "# requirements.md"
+
+
+def test_assignment_skill_match_exits_zero(cli_conn, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    capsys.readouterr()
+
+    assert main(["assignment", "--skill", "requirements-analysis"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "step 'requirements' via skill 'requirements-analysis'" in captured.out
+
+
+def test_assignment_skill_mismatch_exits_one_without_writes(cli_conn, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    run = store.list_runs_for_task(cli_conn, task.id)[-1]
+    capsys.readouterr()
+    before = (
+        store.get_task(cli_conn, task.id),
+        store.get_run(cli_conn, run.id),
+        store.get_result_for_run(cli_conn, run.id),
+        store.list_artifacts_for_task(cli_conn, task.id),
+        store.list_lifecycle_events_for_task(cli_conn, task.id),
+    )
+
+    assert main(["assignment", "--skill", "nope"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines()[0].startswith(
+        "skillflow assignment: AssignmentMismatch: "
+    )
+    assert "'nope'" in captured.err
+    assert "'requirements-analysis'" in captured.err
+    assert captured.err.splitlines()[-1] == (
+        "Nothing was changed: this command only inspects state."
+    )
+    assert (
+        store.get_task(cli_conn, task.id),
+        store.get_run(cli_conn, run.id),
+        store.get_result_for_run(cli_conn, run.id),
+        store.list_artifacts_for_task(cli_conn, task.id),
+        store.list_lifecycle_events_for_task(cli_conn, task.id),
+    ) == before
+
+
+def test_assignment_without_running_run_exits_one(cli_conn, capsys):
+    _seed_task(cli_conn, workflow_id="software-change")
+
+    assert main(["assignment"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines()[0].startswith(
+        "skillflow assignment: RunNotFound: "
+    )
+    assert captured.err.splitlines()[-1] == (
+        "Nothing was changed: this command only inspects state."
+    )
+
+
+def test_assignment_two_running_runs_reject(cli_conn, capsys):
+    task, _ = _resolve_cli_task(cli_conn)
+    other, _ = _seed_parallel_running_run(cli_conn)
+    capsys.readouterr()
+
+    assert main(["assignment"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "skillflow assignment: AmbiguousCurrentRun: " in captured.err
+    assert f"task {task.id!r}" in captured.err
+    assert f"task {other.id!r}" in captured.err
+
+
+def test_assignment_verifies_a_skill_targeted_run(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    _drive_cli_to_review(cli_conn, cli_ws, task)
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="fundamental_assumption_wrong",
+            artifacts=(("review.md", "review"),),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main(["resolve-task", task.id]) == 0
+    skill_run = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert skill_run.step_id is None
+    created = capsys.readouterr().out
+
+    assert main(["assignment", "--skill", "research"]) == 0
+    matched = capsys.readouterr()
+    assert matched.err == ""
+    assert matched.out == created
+    assert "skill 'research' (no workflow step)" in matched.out
+
+    assert main(["assignment", "--skill", "code-review"]) == 1
+    mismatched = capsys.readouterr()
+    assert mismatched.out == ""
+    assert "skillflow assignment: AssignmentMismatch: " in mismatched.err
+    assert store.get_run(cli_conn, skill_run.id).status is RunStatus.RUNNING
+
+
+def _insert_escaping_artifact(cli_conn, task_id, run_id):
+    now = datetime.now(UTC)
+    escaping = Artifact(
+        id="artifact-escape",
+        task_id=task_id,
+        run_id=run_id,
+        name="requirements.md",
+        type="requirements",
+        version=99,
+        path="../escape.md",
+        created_at=now,
+    )
+    with cli_conn:
+        store.insert_artifact(cli_conn, escaping)
+    return escaping
+
+
+def test_assignment_stored_path_escape_rejected(cli_conn, cli_ws, capsys):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    first = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    assert main(["resolve-task", task.id]) == 0
+    second = store.list_runs_for_task(cli_conn, task.id)[-1]
+    # Corrupt the store only after the clean resolve: the escaping row is the
+    # new chain head, so the rebuild selects it and the print rejects.
+    _insert_escaping_artifact(cli_conn, task.id, first.id)
+    runs_before = store.list_runs_for_task(cli_conn, task.id)
+    capsys.readouterr()
+
+    assert main(["assignment"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "skillflow assignment: ArtifactStorageError: " in captured.err
+    assert captured.err.splitlines()[-1] == (
+        "Nothing was changed: this command only inspects state."
+    )
+    assert store.list_runs_for_task(cli_conn, task.id) == runs_before
+    assert store.get_run(cli_conn, second.id).status is RunStatus.RUNNING
+
+
+def test_resolve_task_stored_path_escape_keeps_a_truthful_sentence(
+    cli_conn, cli_ws, capsys
+):
+    task = _seed_task(cli_conn, workflow_id="software-change")
+    assert main(["resolve-task", task.id]) == 0
+    first = store.list_runs_for_task(cli_conn, task.id)[-1]
+    assert (
+        _complete_cli(
+            cli_conn,
+            cli_ws,
+            outcome="ready",
+            artifacts=(("requirements.md", "requirements"),),
+        )
+        == 0
+    )
+    _insert_escaping_artifact(cli_conn, task.id, first.id)
+    capsys.readouterr()
+
+    assert main(["resolve-task", task.id]) == 1
+
+    runs = store.list_runs_for_task(cli_conn, task.id)
+    assert len(runs) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert lines[0].startswith("skillflow resolve-task: ArtifactStorageError: ")
+    assert f"Run {runs[-1].id!r} was created" in captured.err
+    assert "No Run was created." not in captured.err
+    assert f"`skillflow show-task {task.id}`" in captured.err

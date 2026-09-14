@@ -224,10 +224,7 @@ def _drive_run(ws, task_id, row, run_ids, *, extra=None):
         actual = tuple(c.type for c in report.validation.missing_required)
         assert actual == missing
         # prepare-artifacts is a read-only inspection: no rows, no events.
-        assert (
-            len(store.list_lifecycle_events_for_task(conn, task_id))
-            == events_before
-        )
+        assert len(store.list_lifecycle_events_for_task(conn, task_id)) == events_before
 
         done = complete(
             conn,
@@ -287,17 +284,11 @@ def test_human_decision_loop_to_approved(ws, workflows):
                 request=DecisionRequest(decision="approved"),
             )
         assert exc_info.value.code == "InvalidHumanDecision"
-        assert (
-            store.get_task(conn, task_id).status
-            is TaskStatus.WAITING_FOR_HUMAN
-        )
+        assert store.get_task(conn, task_id).status is TaskStatus.WAITING_FOR_HUMAN
         assert store.list_human_decisions_for_task(conn, task_id) == []
         assert store.get_result_for_run(conn, run_ids[3]) == result_before
         assert len(store.list_runs_for_task(conn, task_id)) == 4
-        assert (
-            len(store.list_lifecycle_events_for_task(conn, task_id))
-            == events_before
-        )
+        assert len(store.list_lifecycle_events_for_task(conn, task_id)) == events_before
 
         record = decide_cmd(
             conn,
@@ -417,10 +408,7 @@ def _decide_terminal(ws, task_id, run_ids, *, decision, action, status):
     expected ``ActionType``, ``status`` the expected terminal Task status.
     """
     with _session(ws) as conn:
-        assert (
-            store.get_task(conn, task_id).status
-            is TaskStatus.WAITING_FOR_HUMAN
-        )
+        assert store.get_task(conn, task_id).status is TaskStatus.WAITING_FOR_HUMAN
         result_before = store.get_result_for_run(conn, run_ids[3])
         assert result_before is not None
 
@@ -449,9 +437,7 @@ def _decide_terminal(ws, task_id, run_ids, *, decision, action, status):
         runs = store.list_runs_for_task(conn, task_id)
         assert [run.id for run in runs] == run_ids
         assert all(run.status is RunStatus.COMPLETED for run in runs)
-        (terminal_decision,) = store.list_human_decisions_for_task(
-            conn, task_id
-        )
+        (terminal_decision,) = store.list_human_decisions_for_task(conn, task_id)
         assert terminal_decision.decision == decision
 
 

@@ -158,11 +158,15 @@ and prints its `RunInput`:
 skillflow resolve-task "$TASK"
 ```
 
-The RunInput names the Task, the Run, the step's skill/model/effort,
-the resolved context artifacts (name, type, version), the unresolved
-declared types, and the step's expected outputs. It fails while another
-Run is `running` (`ActiveRunExists`), while the Task waits for a human
-(`HumanDecisionRequired`), or on a terminal Task (nothing to run).
+The RunInput names the Task, the Run, the Workflow, the step's
+skill/model/effort, the resolved context artifacts (name, type, version,
+plus the repo-relative content path under `.skillflow/artifacts/`), the
+unresolved declared types, and the step's expected outputs. It fails
+while another Run is `running` (`ActiveRunExists`), while the Task waits
+for a human (`HumanDecisionRequired`), or on a terminal Task (nothing to
+run). The same Assignment can be re-printed at any time while the Run is
+`running` with `skillflow assignment` (add `--skill NAME` to verify the
+Run targets that skill); it reads only and changes nothing.
 
 **Do the bounded work** in this session only: read the selected
 context, do the step's job, write ordinary project files. Durable
@@ -315,6 +319,7 @@ CLI-only operator commands (deliberately no corresponding skill):
 |---|---|
 | `skillflow fail-run` | Record the running Run as failed, with optional diagnostics |
 | `skillflow show-task <task-id>` | Read-only lifecycle view for any Task |
+| `skillflow assignment [--skill NAME]` | Re-print the running Run's Assignment; `--skill` verifies the Run's skill |
 
 Per-command operating rules: `operational-protocol.md`. Definition
 schema: `workflow-schema.md`. Worked transcript:

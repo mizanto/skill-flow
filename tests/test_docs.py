@@ -39,9 +39,9 @@ def test_documented_skills_exist():
     pattern = re.compile(r"/skillflow:([a-z-]+)")
     for doc in DOCS:
         for token in sorted(set(pattern.findall(doc.read_text(encoding="utf-8")))):
-            assert (COMMANDS_DIR / f"{token}.md").is_file(), (
-                f"{doc.name} names unknown skill: {token}"
-            )
+            assert (
+                COMMANDS_DIR / f"{token}.md"
+            ).is_file(), f"{doc.name} names unknown skill: {token}"
 
 
 def test_documented_relative_links_resolve():

@@ -379,12 +379,14 @@ def test_fundamental_assumption_cli_walk(ws, workflows, monkeypatch, capsys):
 
         if index == 4:
             # The re-entered research Run prints review v1, plan v1 and
-            # research v1 as its context, in declaration order.
+            # research v1 as its context, in declaration order, each with
+            # its repo-relative content path (SF-44).
+            store_prefix = f".skillflow/artifacts/{task_id}"
             assert (
                 "Context:\n"
-                "  - review.md (review v1)\n"
-                "  - plan.md (plan v1)\n"
-                "  - research.md (research v1)\n"
+                f"  - review.md (review v1): {store_prefix}/review-v1.md\n"
+                f"  - plan.md (plan v1): {store_prefix}/plan-v1.md\n"
+                f"  - research.md (research v1): {store_prefix}/research-v1.md\n"
             ) in resolved
 
         args = ["complete-run", "--outcome", decision]

@@ -372,6 +372,15 @@ was created, or no Result was created and no Run status changed.
 | `InvalidDiagnostics` | Blank `--message`, or unreadable/non-UTF-8 diagnostics file | Fix the flag or file, re-run |
 | `InvalidArtifactSubmission` | Submission malformed, file unreadable/non-UTF-8, name invalid or duplicate, or type-chain mismatch | Fix the `NAME:TYPE:PATH` spec or file, re-run |
 
+`assignment` (codes from [`assignment.py`](../src/skillflow/assignment.py)):
+
+| Code | Meaning | Recovery |
+|---|---|---|
+| `RunNotFound` | No `running` Run to inspect | Start one via `resolve-task`; a Run is never resumed |
+| `AmbiguousCurrentRun` | Several Runs `running` in workspace | Finish all but one, re-run |
+| `StepUnresolved` / `WorkflowMismatch` | Run's step or skill cannot be resolved | Escalate; do not invent a step |
+| `AssignmentMismatch` | `--skill` names another skill | Dispatch the Run's own skill |
+
 ## Inspection
 
 `skillflow show-task <task-id>` prints a read-only debug view of a Task

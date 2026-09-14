@@ -31,8 +31,8 @@ the order is the contract, because it fixes error precedence:
 8  read artifacts: the Task's (a step Run) or the triggering Run's
    (a skill-targeted Run, SF-32)
 9  service.create_run(...)  <- the single write
-10 run_input.resolve_run_input(...) / resolve_skill_run_input(...)
-   <- pure projection, branched on the action
+10 run_input.resolve_stored_run_input(...)
+   <- pure projection, shared with `assignment` (SF-44)
 ```
 
 Steps 1-3 and 5-8 are reads only. Step 4 performs the one user-requested
@@ -43,9 +43,11 @@ written. Every other rejection therefore happens **before** the single
 lifecycle write (step 9), so no path can strand a ``running`` Run.
 Lifecycle rules themselves are never decided here: initial resolution and
 outcome mapping are delegated to :mod:`skillflow.evaluator`, context to
-:func:`skillflow.run_input.resolve_run_input` (or
-``resolve_skill_run_input`` for a skill-targeted action), persistence to
-:mod:`skillflow.service` / :mod:`skillflow.store`.
+:func:`skillflow.run_input.resolve_stored_run_input` (which delegates to
+``resolve_run_input`` / ``resolve_skill_run_input`` per half, and which
+``assignment`` calls too, so a rebuild is this same value), persistence to
+:mod:`skillflow.service` / :mod:`skillflow.store`. The failed-skill-run skill
+lookup is likewise the shared :func:`skillflow.assignment.created_skill`.
 
 Boundaries: this module never launches Claude Code, never creates a second
 Run, never selects a Workflow on its own (an unassigned Task without an
@@ -55,14 +57,15 @@ only ``sqlite3`` and ``skillflow`` value/layer modules.
 
 import sqlite3
 
-from skillflow.domain import LifecycleEventType, RunStatus, TaskStatus
+from skillflow.assignment import created_skill
+from skillflow.domain import RunStatus, TaskStatus
 from skillflow.evaluator import (
     EvaluationInput,
     WorkflowSelectionRequiredError,
     evaluate,
     resolve_initial_action,
 )
-from skillflow.run_input import RunInput, resolve_run_input, resolve_skill_run_input
+from skillflow.run_input import RunInput, resolve_stored_run_input
 from skillflow.service import assign_workflow, create_run, register_workflow
 from skillflow.store import (
     get_result_for_run,
@@ -70,7 +73,6 @@ from skillflow.store import (
     list_artifacts_for_run,
     list_artifacts_for_task,
     list_human_decisions_for_task,
-    list_lifecycle_events_for_task,
     list_running_runs,
     list_runs_for_task,
     list_tasks_by_status,
@@ -269,20 +271,9 @@ def resolve_task(
         if current.status is RunStatus.FAILED and current.step_id is None:
             # A failed skill-targeted Run (SF-35): the retry re-issues the
             # recorded skill, resolved from the Run's own `run.created`
-            # payload -- the same lookup `fail_run` performs, duplicated
-            # here with it rather than shared (a five-line filter; a shared
-            # helper no other issue asks for is the alternative).
-            skill = next(
-                (
-                    event.payload["skill"]
-                    for event in list_lifecycle_events_for_task(conn, task.id)
-                    if event.run_id == current.id
-                    and event.type is LifecycleEventType.RUN_CREATED
-                    and event.payload is not None
-                    and event.payload.get("skill")
-                ),
-                None,
-            )
+            # payload -- the one shared lookup (SF-44), also used by
+            # `fail_run` and `assignment`.
+            skill = created_skill(conn, current)
             if skill is None:
                 raise ResolveTaskError(
                     "StepUnresolved",
@@ -349,8 +340,12 @@ def resolve_task(
             action=action,
             triggered_by_run_id=triggered_by_run_id,
         )
-        return resolve_skill_run_input(
-            task=task, run=run, skill=action.skill, artifacts=trigger_artifacts
+        return resolve_stored_run_input(
+            task=task,
+            run=run,
+            step=None,
+            skill=action.skill,
+            artifacts=trigger_artifacts,
         )
     step = definition.find_step(action.step)
     if step is None:
@@ -365,4 +360,6 @@ def resolve_task(
     run = create_run(
         conn, task_id=task.id, action=action, triggered_by_run_id=triggered_by_run_id
     )
-    return resolve_run_input(task=task, run=run, step=step, artifacts=artifacts)
+    return resolve_stored_run_input(
+        task=task, run=run, step=step, skill=None, artifacts=artifacts
+    )

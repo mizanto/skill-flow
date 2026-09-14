@@ -383,34 +383,38 @@ def test_lifecycle_event_trail_for_human_decision_loop(ws, workflows):
 
         assigned, run1 = chunks[1]
         assert assigned.run_id is None
-        assert dict(assigned.payload) == {
-            "workflow_definition_id": "software-change"
-        }
+        assert dict(assigned.payload) == {"workflow_definition_id": "software-change"}
         _assert_run_created(
-            run1, r1, reason="initial", triggered_by=None,
+            run1,
+            r1,
+            reason="initial",
+            triggered_by=None,
             step_id="requirements",
         )
 
         res1, done1, art1 = chunks[2]
-        _assert_result_created(
-            res1, r1, outcome_type="requirements", decision="ready"
-        )
+        _assert_result_created(res1, r1, outcome_type="requirements", decision="ready")
         _assert_run_completed(done1, r1)
         _assert_artifact_created(
-            art1, task_id, r1, name="requirements.md",
-            type="requirements", version="1",
+            art1,
+            task_id,
+            r1,
+            name="requirements.md",
+            type="requirements",
+            version="1",
         )
 
         (run2,) = chunks[3]
         _assert_run_created(
-            run2, r2, reason="ready", triggered_by=r1,
+            run2,
+            r2,
+            reason="ready",
+            triggered_by=r1,
             step_id="decomposition",
         )
 
         res2, done2, art2 = chunks[4]
-        _assert_result_created(
-            res2, r2, outcome_type="decomposition", decision="ready"
-        )
+        _assert_result_created(res2, r2, outcome_type="decomposition", decision="ready")
         _assert_run_completed(done2, r2)
         _assert_artifact_created(
             art2, task_id, r2, name="plan.md", type="plan", version="1"
@@ -418,7 +422,10 @@ def test_lifecycle_event_trail_for_human_decision_loop(ws, workflows):
 
         (run3,) = chunks[5]
         _assert_run_created(
-            run3, r3, reason="ready", triggered_by=r2,
+            run3,
+            r3,
+            reason="ready",
+            triggered_by=r2,
             step_id="implementation",
         )
 
@@ -429,9 +436,7 @@ def test_lifecycle_event_trail_for_human_decision_loop(ws, workflows):
         _assert_run_completed(done3, r3)
 
         (run4,) = chunks[7]
-        _assert_run_created(
-            run4, r4, reason="ready", triggered_by=r3, step_id="review"
-        )
+        _assert_run_created(run4, r4, reason="ready", triggered_by=r3, step_id="review")
 
         res4, done4, parked, art4 = chunks[8]
         _assert_result_created(
@@ -439,24 +444,39 @@ def test_lifecycle_event_trail_for_human_decision_loop(ws, workflows):
         )
         _assert_run_completed(done4, r4)
         _assert_status_changed(
-            parked, r4, frm="active", to="waiting_for_human",
-            action="human", reason="human_required",
+            parked,
+            r4,
+            frm="active",
+            to="waiting_for_human",
+            action="human",
+            reason="human_required",
         )
         _assert_artifact_created(
-            art4, task_id, r4, name="review.md", type="review",
+            art4,
+            task_id,
+            r4,
+            name="review.md",
+            type="review",
             version="1",
         )
 
         made, active = chunks[9]
         _assert_human_made(made, r4, decision="request_changes")
         _assert_status_changed(
-            active, r4, frm="waiting_for_human", to="active",
-            action="run", reason="request_changes",
+            active,
+            r4,
+            frm="waiting_for_human",
+            to="active",
+            action="run",
+            reason="request_changes",
         )
 
         (run5,) = chunks[10]
         _assert_run_created(
-            run5, r5, reason="request_changes", triggered_by=r4,
+            run5,
+            r5,
+            reason="request_changes",
+            triggered_by=r4,
             step_id="implementation",
         )
 
@@ -467,21 +487,25 @@ def test_lifecycle_event_trail_for_human_decision_loop(ws, workflows):
         _assert_run_completed(done5, r5)
 
         (run6,) = chunks[12]
-        _assert_run_created(
-            run6, r6, reason="ready", triggered_by=r5, step_id="review"
-        )
+        _assert_run_created(run6, r6, reason="ready", triggered_by=r5, step_id="review")
 
         res6, done6, finished, art6 = chunks[13]
-        _assert_result_created(
-            res6, r6, outcome_type="review", decision="approved"
-        )
+        _assert_result_created(res6, r6, outcome_type="review", decision="approved")
         _assert_run_completed(done6, r6)
         _assert_status_changed(
-            finished, r6, frm="active", to="completed",
-            action="complete", reason="approved",
+            finished,
+            r6,
+            frm="active",
+            to="completed",
+            action="complete",
+            reason="approved",
         )
         _assert_artifact_created(
-            art6, task_id, r6, name="review.md", type="review",
+            art6,
+            task_id,
+            r6,
+            name="review.md",
+            type="review",
             version="2",
         )
 
@@ -496,16 +520,11 @@ def test_lifecycle_commands_ignore_the_event_stream(ws, workflows):
     # test instrumentation, not a new store API.
     with _session(ws) as conn:
         with conn:
-            conn.execute(
-                "DELETE FROM lifecycle_events WHERE task_id = ?", (task_id,)
-            )
+            conn.execute("DELETE FROM lifecycle_events WHERE task_id = ?", (task_id,))
         assert store.list_lifecycle_events_for_task(conn, task_id) == []
 
         # Current state still reads in full with zero events.
-        assert (
-            store.get_task(conn, task_id).status
-            is TaskStatus.WAITING_FOR_HUMAN
-        )
+        assert store.get_task(conn, task_id).status is TaskStatus.WAITING_FOR_HUMAN
         runs = store.list_runs_for_task(conn, task_id)
         assert [run.id for run in runs] == run_ids
         assert all(run.status is RunStatus.COMPLETED for run in runs)

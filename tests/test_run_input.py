@@ -36,7 +36,12 @@ from skillflow.domain import (
     TaskStatus,
 )
 from skillflow.evaluator import EvaluationOutput
-from skillflow.run_input import RunInput, resolve_run_input, resolve_skill_run_input
+from skillflow.run_input import (
+    RunInput,
+    resolve_run_input,
+    resolve_skill_run_input,
+    resolve_stored_run_input,
+)
 from skillflow.service import create_run, create_task, register_workflow
 from skillflow.workflow import ActionType, ExpectedOutput, WorkflowStep
 from skillflow.workflow_loader import load_workflow
@@ -150,6 +155,7 @@ def test_all_matches_the_public_surface():
     assert set(run_input_module.__all__) == V0_DATACLASSES | {
         "resolve_run_input",
         "resolve_skill_run_input",
+        "resolve_stored_run_input",
     }
 
 
@@ -773,3 +779,94 @@ def test_skill_run_artifact_validation_is_delegated():
     with pytest.raises(ValueError) as exc:
         _skill_resolve(artifacts=[_artifact(task_id="other-task")])
     assert "other-task" in str(exc.value)
+
+
+# --- resolve_stored_run_input (SF-44) ------------------------------------------
+
+
+def _stored_resolve(**over):
+    """``resolve_stored_run_input`` with a consistent step-Run default."""
+    kw = dict(
+        task=_task(),
+        run=_run(),
+        step=_step(),
+        skill=None,
+        artifacts=[],
+    )
+    kw.update(over)
+    return resolve_stored_run_input(**kw)
+
+
+def test_stored_step_run_matches_the_step_projection():
+    step = _step(context=("requirements",))
+    expected = resolve_run_input(
+        task=_task(), run=_run(), step=step, artifacts=[_artifact()]
+    )
+
+    resolved = _stored_resolve(step=step, artifacts=[_artifact()])
+
+    assert resolved == expected
+    assert resolved.step_id == "implementation"
+    assert resolved.skill == "sk"
+
+
+def test_stored_skill_run_matches_the_skill_projection():
+    review = _artifact(
+        id="rev-1",
+        run_id="run-0",
+        name="review.md",
+        type="review",
+        path="task-1/review-v1.md",
+    )
+    expected = resolve_skill_run_input(
+        task=_task(), run=_run(step_id=None), skill="research", artifacts=[review]
+    )
+
+    resolved = _stored_resolve(
+        run=_run(step_id=None), step=None, skill="research", artifacts=[review]
+    )
+
+    assert resolved == expected
+    assert resolved.step_id is None
+    assert [a.name for a in resolved.context.artifacts] == ["review.md"]
+
+
+def test_stored_branch_key_is_the_run_not_the_arguments():
+    # The other half's argument is ignored: a step Run resolves from its
+    # step even when a skill is also passed, and vice versa.
+    step_resolved = _stored_resolve(skill="ignored-skill")
+    assert step_resolved.skill == "sk"
+
+    skill_resolved = _stored_resolve(
+        run=_run(step_id=None), step=_step(), skill="research"
+    )
+    assert skill_resolved.step_id is None
+    assert skill_resolved.skill == "research"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{"task": "task-1"}, {"run": "run-1"}],
+    ids=["task", "run"],
+)
+def test_stored_non_entity_inputs_rejected(kw):
+    with pytest.raises(ValueError):
+        _stored_resolve(**kw)
+
+
+@pytest.mark.parametrize("step", [None, "implementation"], ids=["none", "str"])
+def test_stored_step_run_without_a_step_rejected(step):
+    with pytest.raises(ValueError):
+        _stored_resolve(step=step)
+
+
+def test_stored_step_run_with_another_step_rejected():
+    with pytest.raises(ValueError) as exc:
+        _stored_resolve(step=_step("other"))
+    assert "other" in str(exc.value)
+
+
+@pytest.mark.parametrize("skill", [None, "", "  "], ids=["none", "empty", "blank"])
+def test_stored_skill_run_without_a_skill_rejected(skill):
+    with pytest.raises(ValueError):
+        _stored_resolve(run=_run(step_id=None), step=None, skill=skill)

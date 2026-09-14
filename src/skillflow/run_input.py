@@ -17,7 +17,9 @@ value object handed to the session.
 A skill-targeted Run (SF-A-4 §9) takes the second half:
 :func:`resolve_skill_run_input` (SF-32, gap-fill) projects the action's skill
 with no step-derived parameters and the triggering Run's artifacts as context.
-Which half applies is ``resolve-task``'s branch on the resolving action.
+Which half applies is ``resolve-task``'s branch on the resolving action --
+or, for a Run rebuilt from stored state (``assignment``, SF-44),
+:func:`resolve_stored_run_input`'s branch on the stored ``run.step_id``.
 
 Two boundaries:
 
@@ -74,7 +76,12 @@ from skillflow.context import (
 from skillflow.domain import Artifact, Run, Task
 from skillflow.workflow import ExpectedOutput, WorkflowStep
 
-__all__ = ["RunInput", "resolve_run_input", "resolve_skill_run_input"]
+__all__ = [
+    "RunInput",
+    "resolve_run_input",
+    "resolve_skill_run_input",
+    "resolve_stored_run_input",
+]
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -309,3 +316,62 @@ def resolve_skill_run_input(
         context=select_trigger_context(task=task, artifacts=artifacts),
         outputs=(),
     )
+
+
+def resolve_stored_run_input(
+    *,
+    task: Task,
+    run: Run,
+    step: WorkflowStep | None,
+    skill: str | None,
+    artifacts: Iterable[Artifact],
+) -> RunInput:
+    """Return the :class:`RunInput` for ``run`` rebuilt from stored state.
+
+    The one shared projection both ``resolve-task`` (SF-20, after creating
+    the Run) and ``assignment`` (SF-44, for the workspace's running Run) call,
+    so a rebuilt Assignment is the creation-time ``RunInput`` by construction.
+    The caller loads whatever the stored Run needs -- the ``WorkflowStep``
+    for a step Run, the ``run.created`` skill for a skill-targeted Run, and
+    the artifact set (the Task's, or the triggering Run's) -- and this
+    function only picks the half and delegates. Loading stays with the
+    caller because each command rejects differently when its half cannot be
+    loaded (``resolve-task`` carries ``ResolveTaskError`` hints,
+    ``assignment`` carries ``AssignmentError`` hints).
+
+    The rule order below is the contract: it fixes error precedence
+    (mirroring :func:`resolve_run_input`).
+
+    1. ``task`` is a ``Task`` and ``run`` is a ``Run``, else ``ValueError``.
+    2. ``run.step_id is not None`` -> ``step`` must be a ``WorkflowStep``
+       with ``step.id == run.step_id``, else ``ValueError``; delegate to
+       :func:`resolve_run_input` (``skill`` is ignored on this half).
+    3. ``run.step_id is None`` -> ``skill`` must be a non-blank string, else
+       ``ValueError``; delegate to :func:`resolve_skill_run_input` (``step``
+       is ignored on this half).
+
+    The branch key is the stored ``run.step_id``, never which argument was
+    passed: a caller handing a step for a skill Run (or vice versa) is a
+    caller error, reported before any projection runs.
+    """
+    if not isinstance(task, Task):
+        raise ValueError("resolve_stored_run_input() task must be a Task")
+    if not isinstance(run, Run):
+        raise ValueError("resolve_stored_run_input() run must be a Run")
+
+    if run.step_id is not None:
+        if not isinstance(step, WorkflowStep):
+            raise ValueError(
+                f"run {run.id!r} targets step {run.step_id!r}, so a WorkflowStep "
+                "is required; resolve_stored_run_input() projects a stored "
+                "step Run onto its own step"
+            )
+        return resolve_run_input(task=task, run=run, step=step, artifacts=artifacts)
+
+    if not isinstance(skill, str) or not skill.strip():
+        raise ValueError(
+            f"run {run.id!r} has no workflow step, so its skill is required; "
+            "resolve_stored_run_input() projects a stored skill Run from its "
+            "recorded skill"
+        )
+    return resolve_skill_run_input(task=task, run=run, skill=skill, artifacts=artifacts)

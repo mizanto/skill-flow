@@ -405,9 +405,7 @@ def list_definition_ids(directory: Path | str) -> tuple[str, ...]:
         return ()
     return tuple(
         sorted(
-            p.stem
-            for p in directory.glob(f"*{WORKFLOW_FILE_SUFFIX}")
-            if p.is_file()
+            p.stem for p in directory.glob(f"*{WORKFLOW_FILE_SUFFIX}") if p.is_file()
         )
     )
 

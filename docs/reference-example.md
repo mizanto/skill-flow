@@ -81,6 +81,7 @@ skillflow complete-run --outcome ready --artifact research.md:research:research.
 ```text
 Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it
 Run run-ad56d693ea464e0795e6b4dc5e9d00a3 (running) -- step 'research' via skill 'skillflow:research'
+Workflow: software-change
 Execution: model: opus, effort: high
 Context: none selected
 Unresolved context types: review, plan, research
@@ -123,9 +124,10 @@ skillflow complete-run --outcome ready --artifact plan.md:plan:plan.md
 ```text
 [...]
 Run run-1b1449e1752b43a8aea36d99a0d157e9 (running) -- step 'decomposition' via skill 'skillflow:decomposition'
+Workflow: software-change
 Execution: model: opus, effort: high
 Context:
-  - research.md (research v1)
+  - research.md (research v1): .skillflow/artifacts/task-a0668ec1db08495f93cb7c4b7fe77dbe/research-v1.md
 Unresolved context types: review
 Expected outputs:
   - plan (required)
@@ -148,9 +150,10 @@ skillflow complete-run --outcome ready
 ```text
 [...]
 Run run-a90ce8cd6151496ba345f0eee5230a6a (running) -- step 'implementation' via skill 'skillflow:implementation'
+Workflow: software-change
 Execution: model: sonnet, effort: high
 Context:
-  - plan.md (plan v1)
+  - plan.md (plan v1): .skillflow/artifacts/task-a0668ec1db08495f93cb7c4b7fe77dbe/plan-v1.md
 Unresolved context types: review
 Expected outputs: none declared
 [...]
@@ -248,10 +251,11 @@ skillflow resolve-task "$TASK2"
 ```text
 [...]
 Run run-bd1c636e5b9141458a7c6b55e3834ecf (running) -- step 'implementation' via skill 'skillflow:implementation'
+Workflow: software-change
 Execution: model: sonnet, effort: high
 Context:
-  - plan.md (plan v1)
-  - review.md (review v1)
+  - plan.md (plan v1): .skillflow/artifacts/$TASK2/plan-v1.md
+  - review.md (review v1): .skillflow/artifacts/$TASK2/review-v1.md
 Expected outputs: none declared
 [...]
 ```
@@ -392,6 +396,7 @@ Run research.
 [...]
 Task task-0c4415abcb99407ca7e06ff7941bea91: Failure demo
 Run run-04e434a1d082483a96d290ce3006a429 (running) -- step 'research' via skill 'skillflow:research'
+Workflow: software-change
 ```
 
 The failed Run is never resumed; the retry is a new Run, and the
@@ -429,6 +434,7 @@ No Run was created.
 exit: 1
 Task task-2ec04ec7382348a2b845c648fdf83f03: Unassigned
 Run run-8938f82c939845b3850798a0bf820c11 (running) -- step 'research' via skill 'skillflow:research'
+Workflow: software-change
 ```
 
 Assignment is permanent; from here the Task behaves exactly like §1.
