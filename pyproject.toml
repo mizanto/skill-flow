@@ -25,6 +25,9 @@ packages = ["src/skillflow"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "acceptance: live Claude Code tests (need SKILLFLOW_ACCEPTANCE=1, the claude CLI, and API quota)",
+]
 
 [tool.ruff]
 src = ["src", "tests"]

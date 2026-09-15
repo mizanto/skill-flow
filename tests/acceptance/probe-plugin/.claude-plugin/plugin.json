@@ -1,0 +1,1 @@
+{"description": "Isolation probe plugin for the SkillFlow acceptance suite (SF-49). Provides the forked canary skill used by A3; test fixture, not shipped product.", "name": "probe", "version": "0.1.0"}
