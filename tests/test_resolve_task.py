@@ -244,6 +244,62 @@ def test_waiting_for_human_task_is_rejected(conn, ws, workflows):
     assert _runs(conn) == []
 
 
+def test_waiting_task_without_resolvable_step_uses_generic_message(conn, ws, workflows):
+    # No Runs behind the waiting Task: enrichment degrades to the generic
+    # message rather than leaking another code.
+    _, task = _assigned(conn)
+    task = _set_status(conn, task, TaskStatus.WAITING_FOR_HUMAN)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "HumanDecisionRequired"
+    assert "allowed decisions" not in str(exc_info.value)
+    assert _runs(conn) == []
+
+
+def test_waiting_task_rejection_lists_decisions_and_artifact_paths(conn, ws, workflows):
+    _, task = _assigned(conn)
+    review_run = _drive_to_review(conn, ws, task)
+    _result(conn, review_run, decision="human_required", type="review")
+    _artifact(conn, ws, review_run, name="review.md", type="review")
+    task = _set_status(conn, task, TaskStatus.WAITING_FOR_HUMAN)
+
+    runs_before = _runs(conn)
+    events_before = len(store.list_lifecycle_events_for_task(conn, task.id))
+    decisions_before = len(store.list_human_decisions_for_task(conn, task.id))
+
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "HumanDecisionRequired"
+    message = str(exc_info.value)
+    # Declaration order of the reference review step's decisions table.
+    assert "allowed decisions: approve, request_changes, cancel" in message
+    assert "review.md (review v1)" in message
+    assert f".skillflow/artifacts/{task.id}/review-v1.md" in message
+    assert "skillflow decide <decision>" in message
+    # Nothing written: no Run, no decision, no events.
+    assert _runs(conn) == runs_before
+    assert len(store.list_lifecycle_events_for_task(conn, task.id)) == events_before
+    assert len(store.list_human_decisions_for_task(conn, task.id)) == decisions_before
+
+
+def test_waiting_task_without_artifacts_omits_the_paths_segment(conn, ws, workflows):
+    # The waiting Run registered nothing: decisions are still listed, but
+    # there is no `artifacts:` segment.
+    _, task = _assigned(conn)
+    review_run = _drive_to_review(conn, ws, task)
+    _result(conn, review_run, decision="human_required", type="review")
+    task = _set_status(conn, task, TaskStatus.WAITING_FOR_HUMAN)
+    runs_before = _runs(conn)
+    with pytest.raises(ResolveTaskError) as exc_info:
+        resolve(conn, ws, task_id=task.id)
+    assert exc_info.value.code == "HumanDecisionRequired"
+    message = str(exc_info.value)
+    assert "allowed decisions: approve, request_changes, cancel" in message
+    assert "artifacts:" not in message
+    assert "skillflow decide <decision>" in message
+    assert _runs(conn) == runs_before
+
+
 def test_running_run_is_rejected(conn, ws, workflows):
     workflow, task = _assigned(conn)
     first = create_run(

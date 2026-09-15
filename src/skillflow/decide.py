@@ -23,6 +23,8 @@ precedence (the convention every sibling module already documents):
 3  current Run = latest Run of the Task (list_runs_for_task order)
      no runs ................. -> RunNotFound
      latest not COMPLETED .... -> RunNotCompleted
+   (steps 3-4 are :func:`resolve_waiting_step`, shared with
+   ``resolve-task``'s waiting rejection, SF-50)
 4  resolve the Run's step (reads only)
      run.workflow_definition_id None -> StepUnresolved
      load_definition(...) .......... -> WorkflowLoadError propagates
@@ -76,6 +78,8 @@ from skillflow.domain import (
     HumanDecision,
     LifecycleEvent,
     LifecycleEventType,
+    Result,
+    Run,
     RunStatus,
     Task,
     TaskStatus,
@@ -88,10 +92,11 @@ from skillflow.store import (
     list_runs_for_task,
     list_tasks_by_status,
 )
+from skillflow.workflow import Workflow, WorkflowStep
 from skillflow.workflow_loader import load_definition
 from skillflow.workspace import Workspace
 
-__all__ = ["DecideError", "DecisionRecord", "decide"]
+__all__ = ["DecideError", "DecisionRecord", "decide", "resolve_waiting_step"]
 
 
 # Deliberately duplicated from ``service._new_id`` / ``artifacts._new_id`` /
@@ -145,73 +150,25 @@ class DecisionRecord:
             raise ValueError("DecisionRecord.action must be an EvaluationOutput")
 
 
-def decide(
-    conn: sqlite3.Connection,
-    workspace: Workspace,
-    *,
-    task_id: str | None = None,
-    request: DecisionRequest,
-) -> DecisionRecord:
-    """Record ``request`` on the ``waiting_for_human`` Task and apply it.
+def resolve_waiting_step(
+    conn: sqlite3.Connection, workspace: Workspace, task: Task
+) -> tuple[Workflow, WorkflowStep, Run, Result]:
+    """Resolve the waiting step behind a ``waiting_for_human`` Task.
 
-    Implements the pipeline in the module docstring verbatim. ``task_id`` is a
-    disambiguator only: it selects which Task to decide when several are
-    waiting, never influencing the decision. Raises :class:`DecideError` (with
-    ``code``) for every command-level rejection, and lets ``DecisionError``
-    (SF-26), ``EvaluationError`` and ``WorkflowLoadError`` propagate
-    unchanged -- all are flat classes carrying their own identifiers, so
-    re-wrapping would only lose information.
+    The shared form of ``decide``'s steps 3-4 (SF-50): the Task's latest
+    Run, its Workflow Definition, the step whose ``decisions`` table
+    applies, and the Run's canonical Result. Step Runs resolve by
+    ``run.step_id``; skill-targeted Runs (SF-32) by the parking
+    ``Result``'s ``outcome.type``.
+
+    Reads only. Raises :class:`DecideError` (with ``code``) for every
+    unresolvable history, and lets ``WorkflowLoadError`` propagate
+    unchanged -- the same rejections ``decide`` reports. ``resolve-task``
+    calls this best-effort to enrich its ``HumanDecisionRequired``
+    rejection, degrading to its generic message on any failure.
     """
-    if not isinstance(request, DecisionRequest):
-        raise ValueError("decide() request must be a DecisionRequest")
-
-    if task_id is None:
-        waiting = list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN)
-        if not waiting:
-            raise DecideError(
-                "HumanDecisionNotExpected",
-                "no Task is 'waiting_for_human' in this workspace; decisions "
-                "are recorded only after a Run completes with a human outcome "
-                "-- nothing to decide",
-            )
-        if len(waiting) > 1:
-            ids = ", ".join(repr(task.id) for task in waiting)
-            raise DecideError(
-                "AmbiguousCurrentTask",
-                f"more than one Task is waiting for a human decision ({ids}); "
-                "re-run as `skillflow decide <decision> --task <task-id>`",
-            )
-        task = waiting[0]
-    else:
-        task = get_task(conn, task_id)
-        if task is None:
-            raise DecideError(
-                "TaskNotFound",
-                f"no task with id {task_id!r}; check the id, then run "
-                "`skillflow decide <decision> --task <task-id>` again",
-            )
-
-    if task.status is TaskStatus.COMPLETED:
-        raise DecideError(
-            "TaskAlreadyCompleted",
-            f"task {task.id!r} is already 'completed'; a terminal Task takes "
-            "no decisions -- nothing to decide",
-        )
-    if task.status is TaskStatus.CANCELLED:
-        raise DecideError(
-            "TaskCancelled",
-            f"task {task.id!r} is 'cancelled'; a terminal Task takes no "
-            "decisions -- nothing to decide",
-        )
-    if task.status is TaskStatus.ACTIVE:
-        raise DecideError(
-            "HumanDecisionNotExpected",
-            f"task {task.id!r} is 'active', not 'waiting_for_human'; only a "
-            "waiting Task takes a decision -- finish the current Run with "
-            "`skillflow complete-run`, or start one with "
-            f"`skillflow resolve-task {task.id}`",
-        )
-
+    if not isinstance(task, Task):
+        raise ValueError("resolve_waiting_step requires a Task task")
     runs = list_runs_for_task(conn, task.id)
     if not runs:
         raise DecideError(
@@ -286,6 +243,79 @@ def decide(
                 "decision answers a completed Run's recorded outcome -- "
                 "investigate the Run history",
             )
+    return definition, step, current, result
+
+
+def decide(
+    conn: sqlite3.Connection,
+    workspace: Workspace,
+    *,
+    task_id: str | None = None,
+    request: DecisionRequest,
+) -> DecisionRecord:
+    """Record ``request`` on the ``waiting_for_human`` Task and apply it.
+
+    Implements the pipeline in the module docstring verbatim. ``task_id`` is a
+    disambiguator only: it selects which Task to decide when several are
+    waiting, never influencing the decision. Raises :class:`DecideError` (with
+    ``code``) for every command-level rejection, and lets ``DecisionError``
+    (SF-26), ``EvaluationError`` and ``WorkflowLoadError`` propagate
+    unchanged -- all are flat classes carrying their own identifiers, so
+    re-wrapping would only lose information.
+    """
+    if not isinstance(request, DecisionRequest):
+        raise ValueError("decide() request must be a DecisionRequest")
+
+    if task_id is None:
+        waiting = list_tasks_by_status(conn, TaskStatus.WAITING_FOR_HUMAN)
+        if not waiting:
+            raise DecideError(
+                "HumanDecisionNotExpected",
+                "no Task is 'waiting_for_human' in this workspace; decisions "
+                "are recorded only after a Run completes with a human outcome "
+                "-- nothing to decide",
+            )
+        if len(waiting) > 1:
+            ids = ", ".join(repr(task.id) for task in waiting)
+            raise DecideError(
+                "AmbiguousCurrentTask",
+                f"more than one Task is waiting for a human decision ({ids}); "
+                "re-run as `skillflow decide <decision> --task <task-id>`",
+            )
+        task = waiting[0]
+    else:
+        task = get_task(conn, task_id)
+        if task is None:
+            raise DecideError(
+                "TaskNotFound",
+                f"no task with id {task_id!r}; check the id, then run "
+                "`skillflow decide <decision> --task <task-id>` again",
+            )
+
+    if task.status is TaskStatus.COMPLETED:
+        raise DecideError(
+            "TaskAlreadyCompleted",
+            f"task {task.id!r} is already 'completed'; a terminal Task takes "
+            "no decisions -- nothing to decide",
+        )
+    if task.status is TaskStatus.CANCELLED:
+        raise DecideError(
+            "TaskCancelled",
+            f"task {task.id!r} is 'cancelled'; a terminal Task takes no "
+            "decisions -- nothing to decide",
+        )
+    if task.status is TaskStatus.ACTIVE:
+        raise DecideError(
+            "HumanDecisionNotExpected",
+            f"task {task.id!r} is 'active', not 'waiting_for_human'; only a "
+            "waiting Task takes a decision -- finish the current Run with "
+            "`skillflow complete-run`, or start one with "
+            f"`skillflow resolve-task {task.id}`",
+        )
+
+    # Shared with `resolve-task`'s waiting rejection (SF-50): the same
+    # rows, codes, and messages either caller would resolve.
+    definition, step, current, result = resolve_waiting_step(conn, workspace, task)
 
     validated = validate_decision(step=step, request=request)
 

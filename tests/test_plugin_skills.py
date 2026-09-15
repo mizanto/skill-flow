@@ -91,11 +91,11 @@ SKILL_DIRS = _skill_dirs()
 #: the per-step contract below (it has no workflow step to map to).
 EXECUTION_SKILL_DIRS = [dirname for dirname in SKILL_DIRS if dirname != "work"]
 
-#: The only CLI operations the driver (SF-47) may invoke: create a Task,
-#: inspect the running Run, or resolve the next Run. Anything else
-#: (``complete-run``, ``fail-run``, ``decide``, ...) belongs to an Execution
-#: Skill or to a later issue (SF-50 owns ``decide``).
-DRIVER_SUBCOMMANDS = frozenset({"start", "assignment", "resolve-task"})
+#: The only CLI operations the driver may invoke: create a Task (SF-47),
+#: inspect the running Run (SF-47), resolve the next Run (SF-47), or record
+#: the human's decision on a waiting Task (SF-50). Anything else
+#: (``complete-run``, ``fail-run``, ...) belongs to an Execution Skill.
+DRIVER_SUBCOMMANDS = frozenset({"start", "assignment", "resolve-task", "decide"})
 
 #: The exact frontmatter surface SF-47 prescribes for the driver. A new key
 #: fails loudly here so the addition is a deliberate, reviewed decision. The
@@ -462,6 +462,27 @@ def test_work_branches_on_envelope_codes():
     assert "AskUserQuestion" in text, (
         "work: driver must ask the user which Task to continue on ambiguity"
     )
+
+
+def test_work_human_decision_branch():
+    # SF-50: the driver presents the runtime's allowed decisions, records
+    # the human's choice with decide, and continues the Loop.
+    _, _, text = _read_skill("work")
+    assert "skillflow decide" in text, (
+        "work: the HumanDecisionRequired branch must run `skillflow decide`"
+    )
+    assert "allowed decisions" in text, (
+        "work: decision options must come from the rejection's allowed "
+        "decisions, never invented"
+    )
+    assert "AskUserQuestion" in text
+    assert "--comment" in text, (
+        "work: an optional free-text comment must pass through to decide"
+    )
+    assert "--task" in text, (
+        "work: decide must disambiguate with --task when several Tasks wait"
+    )
+    assert "continue this Loop" in text, "work: a recorded decision continues the Loop"
 
 
 def test_work_after_skill_checks():

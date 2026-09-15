@@ -15,6 +15,10 @@ the order is the contract, because it fixes error precedence:
 2  Task status ................ completed/cancelled -> TaskAlreadyCompleted /
                                                       TaskCancelled
                                  waiting_for_human -> HumanDecisionRequired
+   (the waiting rejection names the waiting step's allowed decisions and
+   the waiting Run's artifact paths when resolvable -- best-effort via
+   decide.resolve_waiting_step, degrading to the generic message on any
+   failure so the code never changes, SF-50)
 3  workspace running Runs ..... any running Run (of ANY Task) -> ActiveRunExists
                                  (SF-A-7 I11: one running Run per workspace)
 4  Workflow selection ......... unassigned + no --workflow
@@ -57,8 +61,10 @@ only ``sqlite3`` and ``skillflow`` value/layer modules.
 
 import sqlite3
 
+from skillflow.artifacts import ArtifactStorageError, content_path
 from skillflow.assignment import created_skill
-from skillflow.domain import RunStatus, TaskStatus
+from skillflow.decide import DecideError, resolve_waiting_step
+from skillflow.domain import RunStatus, Task, TaskStatus
 from skillflow.evaluator import (
     EvaluationInput,
     WorkflowSelectionRequiredError,
@@ -78,7 +84,11 @@ from skillflow.store import (
     list_tasks_by_status,
 )
 from skillflow.workflow import ActionType
-from skillflow.workflow_loader import list_definition_ids, load_definition
+from skillflow.workflow_loader import (
+    WorkflowLoadError,
+    list_definition_ids,
+    load_definition,
+)
 from skillflow.workspace import Workspace
 
 __all__ = ["ResolveTaskError", "resolve_task"]
@@ -105,6 +115,59 @@ class ResolveTaskError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _waiting_message(conn: sqlite3.Connection, workspace: Workspace, task: Task) -> str:
+    """Build the ``HumanDecisionRequired`` message for ``task`` (SF-50).
+
+    Best-effort enrichment, reads only: resolve the waiting step through
+    the shared :func:`skillflow.decide.resolve_waiting_step` and list its
+    ``decisions`` keys (in Workflow declaration order) plus the waiting
+    Run's artifact paths. Any failure -- unresolvable history
+    (``DecideError``), a missing/changed Workflow (``WorkflowLoadError``),
+    or a stored path escaping the store (``ArtifactStorageError``) --
+    degrades to the generic message, so a waiting Task always reports
+    ``HumanDecisionRequired`` and never leaks another code or tracebacks.
+    A waiting Run with no artifacts lists decisions without an
+    ``artifacts:`` segment.
+    """
+    try:
+        _, step, waiting_run, _ = resolve_waiting_step(conn, workspace, task)
+        rendered = []
+        for artifact in list_artifacts_for_run(conn, waiting_run.id):
+            # Twin of ``cli._artifact_relpath`` (SF-44): this module cannot
+            # import ``cli`` (``cli`` imports this module), so the one-line
+            # derivation is duplicated -- the codebase convention for tiny
+            # helpers. Pure path derivation: the file is never read, so a
+            # missing file still prints.
+            path = (
+                content_path(workspace, artifact).relative_to(workspace.root).as_posix()
+            )
+            rendered.append(
+                f"{artifact.name} ({artifact.type} v{artifact.version}): {path}"
+            )
+    except (
+        DecideError,
+        WorkflowLoadError,
+        ArtifactStorageError,
+    ):
+        return (
+            f"task {task.id!r} is 'waiting_for_human'; record a decision "
+            "with `skillflow decide <decision>`, then run "
+            f"`skillflow resolve-task {task.id}`"
+        )
+    message = (
+        f"task {task.id!r} is 'waiting_for_human' "
+        f"(step {step.id!r} of run {waiting_run.id!r}); allowed decisions: "
+        + ", ".join(step.decisions)
+    )
+    if rendered:
+        message += "; artifacts: " + "; ".join(rendered)
+    message += (
+        "; record a decision with `skillflow decide <decision> --task "
+        f"{task.id}`, then run `skillflow resolve-task {task.id}`"
+    )
+    return message
 
 
 def resolve_task(
@@ -170,9 +233,7 @@ def resolve_task(
     if task.status is TaskStatus.WAITING_FOR_HUMAN:
         raise ResolveTaskError(
             "HumanDecisionRequired",
-            f"task {task.id!r} is 'waiting_for_human'; record a decision with "
-            "`skillflow decide <decision>`, then run "
-            f"`skillflow resolve-task {task.id}`",
+            _waiting_message(conn, workspace, task),
         )
 
     # Workspace-wide (SF-43): a running Run of ANY Task blocks resolution.

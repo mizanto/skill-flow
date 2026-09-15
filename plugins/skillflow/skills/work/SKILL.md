@@ -56,8 +56,25 @@ skillflow resolve-task [<task-id>]
 - On `AmbiguousCurrentTask`: use the AskUserQuestion tool to ask which Task id
   to continue, offering exactly the ids from the rejection. Then continue this
   Loop with the chosen id.
-- On `HumanDecisionRequired`: report the rejection verbatim and stop. A human
-  must decide before any further Run.
+- On `HumanDecisionRequired`: the Task waits for a human decision, and the
+  rejection names the waiting step's `allowed decisions:` plus the waiting
+  Run's artifact paths. Never choose a decision yourself:
+  1. Show the user the artifact path(s) quoted in the rejection, so the
+     human can read what is being decided (you have no file tools; read
+     nothing yourself).
+  2. Use the AskUserQuestion tool with one option per allowed decision,
+     taken exactly from the rejection's `allowed decisions:` list -- never
+     invented, never chosen by you. Invite an optional free-text comment in
+     the question.
+  3. Run via the Bash tool (append `--task <task-id>` when a Task id is
+     remembered):
+     ```text
+     skillflow decide <decision> [--comment "<comment>"] [--task <task-id>]
+     ```
+     substituting the human's chosen decision and comment verbatim: quote
+     the comment, pass it through unchanged, never interpret it.
+  4. On exit 0 continue this Loop; on any rejection report it verbatim and
+     stop.
 - On any other rejection: report it verbatim and stop.
 
 ## After a dispatched skill returns

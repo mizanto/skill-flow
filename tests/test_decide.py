@@ -248,6 +248,7 @@ def test_public_surface():
         "DecideError",
         "DecisionRecord",
         "decide",
+        "resolve_waiting_step",
     }
 
 
