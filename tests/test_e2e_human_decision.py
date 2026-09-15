@@ -315,8 +315,8 @@ def test_human_decision_loop_to_approved(ws, workflows):
         # The decision is recorded *against* the review Run: its Result --
         # the observation of what happened -- is byte-identical.
         assert store.get_result_for_run(conn, run_ids[3]) == result_before
-        # And no next Run is created here: the user starts it with
-        # resolve-task in a new session.
+        # And no next Run is created here: the next Run starts via the
+        # driver (/skillflow:work) or manual resolve-task.
         assert len(store.list_runs_for_task(conn, task_id)) == 4
 
     def _check_rework(conn, run_input):

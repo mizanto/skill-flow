@@ -27,12 +27,19 @@ Sources: Execution Boundary v0 (SF-A-3 §§1–11), Command Contract v0
 - **No new commands.** The v0 surface is exactly the four commands
   below (SF-A-5 §12). Anything else in the prohibited list is out of
   scope for v0.
+- **Driver first.** `/skillflow:work` is the normal path: it drives the
+  Run loop and dispatches each Run's Execution Skill in a forked context.
+  The rules below govern the manual path — operating one Run by hand with
+  the four commands.
 
 ## Canonical Run sequence
 
+Normally `/skillflow:work` drives the whole loop: it resolves each Run and
+dispatches the assigned Execution Skill in a forked context until the Task
+is terminal. One manual Run via the four commands follows the same sequence
+in the current execution context:
+
 ```text
-new Claude Code session
-  ↓
 /skillflow:resolve-task <task-id>      (rule 1: resolve before work)
   ↓
 bounded work with normal tools         (rule 2: only this Run)
@@ -47,7 +54,7 @@ Result + Lifecycle Evaluation         (runtime-owned)
   ↓
 report next action                     (rule 7)
   ↓
-session ends                           (rule 5: no next Run here)
+continue with /skillflow:work          (rule 5: no next Run here)
 ```
 
 When the Task is `waiting_for_human`, the lifecycle command is instead:
@@ -71,8 +78,8 @@ SF-A-6 SF-030).
 
 ## Rule 1 — Resolve before work
 
-Start every Run with `/skillflow:resolve-task <task-id>` in a new
-Claude Code session, before any lifecycle work (SF-A-5 §4, SF-A-3 §2).
+Start every manual Run with `/skillflow:resolve-task <task-id>` in the
+current execution context, before any lifecycle work (SF-A-5 §4, SF-A-3 §2).
 
 - Must: resolve the Task first; use the returned RunInput (step, skill,
   instructions, selected context, expected outputs) as the assignment
@@ -88,15 +95,15 @@ Claude Code session, before any lifecycle work (SF-A-5 §4, SF-A-3 §2).
 - On `ActiveRunExists`: a Run is already `running` in this workspace
   (possibly for another Task) — do not resolve again (SF-A-7 I11).
 
-## Rule 2 — One Run per session
+## Rule 2 — One Run per execution context
 
-Execute only the resolved Run in the current session (SF-A-5 §3.3,
-SF-A-3 §6).
+Execute only the resolved Run in the current execution context (SF-A-5
+§3.3, SF-A-3 §6, §18).
 
 - Must: do the bounded work for the resolved step and nothing else.
-- Must not: start, continue, or resume any other Run in this session.
-  A Run is never resumed; retry/continuation is always a new Run in a
-  new session (SF-A-5 §3.2).
+- Must not: start, continue, or resume any other Run in this execution
+  context. A Run is never resumed; retry/continuation is always a new Run
+  (dispatched by the driver or resolved manually) (SF-A-5 §3.2).
 - A failed Run does not fail the Task (SF-A-5 §3.6); reporting a
   failure never means abandoning the Task.
 - After a failed Run, start the retry with rule 1 as usual: it resolves
@@ -167,18 +174,19 @@ Finish the Run with `/skillflow:complete-run`. When the Task is
   performed. Fix the cause and re-invoke the same command (SF-A-5
   §6.4, §6.6, §7.5, §8).
 
-## Rule 5 — No next Run in this session
+## Rule 5 — No next Run in this execution context
 
-Never start another Run in the session that completed one (SF-A-5
-§3.3, SF-A-3 §11).
+Never start another Run in the execution context that completed one
+(SF-A-5 §3.3, SF-A-3 §11, §18).
 
 - Must not: invoke `/skillflow:resolve-task` again after
   `/skillflow:complete-run` or `/skillflow:decide` in the same
-  session. The next Run starts in a new Claude Code session.
+  execution context. Continue with `/skillflow:work`: it resolves the next
+  Run and dispatches its skill.
 - `complete-run` and `decide` never create the next Run — not even
   when evaluation returns a `run` action (SF-A-5 §6.9, §7.7). A `run`
-  result means "Task stays `active`; start the next Run later", never
-  "continue working now".
+  result means "Task stays `active`; continue with `/skillflow:work`",
+  never "continue working now".
 - A `human → human` step is unsupported in v0: a decision never
   produces another `human` action, so `/skillflow:decide` output
   never points back at itself (SF-A-5 §7.7).
@@ -209,14 +217,14 @@ next action, and the exact command that starts the next step
   step or command.
 - Must: write the Run summary yourself — the runtime reports
   lifecycle facts, not what the work accomplished.
-- Must: when the output names a step or a skill, give the
-  `/skillflow:resolve-task <task-id>` pointer and state that it runs
-  in a new session (skill-targeted Runs resolve since SF-32). When it
-  names neither (terminal status, or no lifecycle action), report the
-  status without inventing a resolve pointer.
+- Must: report the `Next:` line from the output (`Next: /skillflow:work`).
+  For manual operation, the re-entry is `/skillflow:resolve-task <task-id>`
+  (bare `resolve-task` defaults to the workspace's single active or waiting Task).
+  When the output names neither a step nor a skill (terminal status, or no
+  lifecycle action), report the status without inventing a resolve pointer.
 
 Report shapes (from [`cli.py`](../src/skillflow/cli.py)
-`format_completion:257-302` and `format_decision:305-341`):
+`format_completion` and `format_decision`):
 
 Next Run (step-targeted):
 
@@ -226,9 +234,7 @@ Run <run-id> completed.
 Next action:
 Run <step>.
 
-Start the next Run in a new Claude Code session:
-
-/skillflow:resolve-task <task-id>
+Next: /skillflow:work
 ```
 
 Next Run (skill-targeted):
@@ -239,9 +245,7 @@ Run <run-id> completed.
 Next action:
 Run skill '<skill>' (reason: <reason>).
 
-Start the next Run in a new Claude Code session:
-
-/skillflow:resolve-task <task-id>
+Next: /skillflow:work
 ```
 
 Human decision required (completion only — `decide` never yields this):

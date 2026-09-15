@@ -5,6 +5,8 @@ allowed-tools: "Bash(skillflow:*)"
 
 # /skillflow:prepare-artifacts
 
+> Manual entry point: /skillflow:work is the normal path; use this command directly for manual or recovery operation.
+
 Check the current `running` Run's expected durable outputs and create every
 missing one. This command never changes lifecycle state: no Result, no
 evaluation, no new Run. Re-running it is always safe. It inspects registered
@@ -15,8 +17,8 @@ normal flow, not an error.
 ## Prerequisites
 
 - The `skillflow` CLI must be on PATH. Check with `skillflow --version`; if it
-  is missing, install it per the SkillFlow README Development section, then
-  continue. Do not proceed without the runtime.
+  is missing, install it per the SkillFlow quick-start (`docs/quick-start.md`),
+  then continue. Do not proceed without the runtime.
 - Run every command from inside the target repository (its root is
   recommended). SkillFlow locates lifecycle state by walking up from the
   working directory.

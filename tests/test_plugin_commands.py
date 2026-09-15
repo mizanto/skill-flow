@@ -234,13 +234,26 @@ def test_skill_invokes_exactly_its_own_runtime_operation(name):
         ("resolve-task", "/skillflow:prepare-artifacts"),
         ("prepare-artifacts", "/skillflow:complete-run"),
         ("complete-run", "/skillflow:resolve-task"),
-        ("complete-run", "new Claude Code session"),
+        ("complete-run", "/skillflow:work"),
         ("decide", "/skillflow:resolve-task"),
+        ("decide", "/skillflow:work"),
     ],
 )
 def test_required_next_command_pointers(name, snippet):
     _, text = _read_command(name)
     assert snippet in text, f"{name}: missing {snippet!r} pointer"
+
+
+@pytest.mark.parametrize("name", COMMANDS)
+def test_commands_marked_as_manual_entry_points(name):
+    # SF-53: the slash commands are the manual/recovery path; the driver
+    # (/skillflow:work) is the normal path. Each file carries the uniform
+    # framing line so the manual role cannot silently drift.
+    _, text = _read_command(name)
+    assert (
+        "> Manual entry point: /skillflow:work is the normal path; "
+        "use this command directly for manual or recovery operation." in text
+    ), f"{name}: missing manual-entry-point framing"
 
 
 @pytest.mark.parametrize("name", COMMANDS)

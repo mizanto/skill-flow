@@ -37,70 +37,74 @@ Instead of passing an entire conversation to the next session, Skill Flow select
 
 ## How it works
 
-Each Run is executed in an independent Claude Code session.
+`/skillflow:work "<task>"` drives the loop: each Run is dispatched to an
+Execution Skill in a forked context with only the durable context it needs.
 
 ```text
-/skillflow:resolve-task <task-id>
+/skillflow:work "<task>"
         ↓
-    Claude Code
-        ↓
-/skillflow:prepare-artifacts
-        ↓
-/skillflow:complete-run
+resolve-task → dispatched skill (forked context) → complete-run
         ↓
  Lifecycle Evaluation
         ↓
-   next action
+   next action (`Next: /skillflow:work`)
 ```
 
-If another Run is required, a new Claude Code session starts it:
-
-```text
-/skillflow:resolve-task <task-id>
-```
-
-Skill Flow does not automatically launch Claude Code in the MVP.
+The driver continues until the Task is terminal. Skill Flow does not
+automatically launch Claude Code in the MVP: dispatch is Claude-side Skill
+invocation, not runtime-side launching.
 
 ## Commands
 
 ```text
+/skillflow:work "<task>"
 /skillflow:resolve-task <task-id>
 /skillflow:prepare-artifacts
 /skillflow:complete-run
 /skillflow:decide <decision>
 ```
 
+`/skillflow:work` is the primary entry: it drives the Task loop. The other
+four are manual/recovery entry points for operating a single Run by hand.
 Operating rules for these commands: [`docs/operational-protocol.md`](docs/operational-protocol.md).
 
 They ship as a Claude Code plugin, with commands and skills under [`plugins/skillflow/`](plugins/skillflow/).
 Each command instructs Claude to run exactly one `skillflow` subcommand, so
-the CLI must be on PATH (see Development below). Validate and try it locally:
+the CLI must resolve from the Bash tool (it does after install, via the
+shipped `bin/skillflow`). Validate and try a checkout locally:
 
 ```bash
 claude plugin validate .
 claude --plugin-dir .
 ```
 
-The runtime also ships two CLI-only operator commands with no skill:
-`skillflow fail-run` (record the running Run as failed) and
+The runtime also ships CLI-only operator commands with no skill:
+`skillflow start` (create a Task from a bundled Workflow Definition),
+`skillflow fail-run` (record the running Run as failed), and
 `skillflow show-task <task-id>` (read-only lifecycle view).
 
-New here? Start with the [user guide](docs/user-guide.md) and the
+New here? Start with the [quick-start](docs/quick-start.md), then the
+[user guide](docs/user-guide.md) and the
 [reference example](docs/reference-example.md).
 
 ## Installation
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.14 or newer.
-From a checkout:
+Inside Claude Code:
 
-```bash
-uv sync
-export PATH="$PWD/.venv/bin:$PATH"
+```text
+/plugin marketplace add https://github.com/mizanto/skill-flow
+/plugin install skillflow
+```
+
+Then check the runtime resolves from the Bash tool:
+
+```text
 skillflow --version
 ```
 
-`uv sync` needs the package index once; afterwards the CLI never needs
-the network. Keep `skillflow` on `PATH`: the plugin shells out to it.
+The install needs the package index once; afterwards the CLI never needs
+the network.
 
 ## Design principles
 
@@ -181,4 +185,4 @@ This repository ignores it while SkillFlow dogfoods itself.
 The core loop (resolve → work → prepare → complete → evaluate → next
 Run), human decisions, failure handling, and the reference
 software-change Workflow are implemented and covered end to end. Run it
-yourself with the [user guide](docs/user-guide.md).
+yourself with the [quick-start](docs/quick-start.md).

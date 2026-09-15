@@ -6,6 +6,8 @@ allowed-tools: "Bash(skillflow:*)"
 
 # /skillflow:decide
 
+> Manual entry point: /skillflow:work is the normal path; use this command directly for manual or recovery operation.
+
 Record a Human Decision while the Task is `waiting_for_human`. On success the
 runtime persists the decision (the previous Result is left unchanged),
 evaluates the lifecycle, and reports the next action. It never creates the
@@ -14,8 +16,8 @@ next Run, and a decision never yields another `human` action.
 ## Prerequisites
 
 - The `skillflow` CLI must be on PATH. Check with `skillflow --version`; if it
-  is missing, install it per the SkillFlow README Development section, then
-  continue. Do not proceed without the runtime.
+  is missing, install it per the SkillFlow quick-start (`docs/quick-start.md`),
+  then continue. Do not proceed without the runtime.
 - Run every command from inside the target repository (its root is
   recommended). SkillFlow locates lifecycle state by walking up from the
   working directory.
@@ -42,16 +44,16 @@ was given, ask the user for one. Never invent a decision.
    of what it concludes (write this yourself -- the runtime reports lifecycle
    facts, not the reasoning), the next action, and the exact entry command
    from the output:
-   - step-targeted `run`: give the `/skillflow:resolve-task <task-id>`
-     pointer and state that it runs in a new Claude Code session;
+   - step-targeted `run`: give the `Next: /skillflow:work` line from the
+     output (manual alternative: `/skillflow:resolve-task <task-id>`);
    - skill-only `run`: report the skill and reason, and give the
-     `/skillflow:resolve-task <task-id>` pointer for a new Claude Code
-     session (skill-targeted Runs resolve);
+     `Next: /skillflow:work` line (manual alternative:
+     `/skillflow:resolve-task <task-id>`);
    - `complete` / `cancel`: report `Task completed.` / `Task cancelled.`
    A decision never yields another `human` action, so never print a second
    `/skillflow:decide` pointer.
-3. End the session's lifecycle work here. Never start another Run in this
-   session.
+3. End this context's lifecycle work here. Never start another Run in this
+   context; continue with `/skillflow:work`.
 
 ## Recovery
 

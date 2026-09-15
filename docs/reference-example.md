@@ -9,20 +9,16 @@ timestamps differ on your machine. Long outputs are trimmed with `[...]`
 
 Conventions: `$TASK` (and `$TASK2`…) hold Task ids; all commands run
 with the scratch repo as the working directory; each `resolve-task`
-starts a new Run as a new session would.
+starts a new Run.
 
 ## 0. Setup
 
-Install once per machine (see the [user guide](user-guide.md) §2), then
+Install once per machine (see the [quick-start](quick-start.md)), then
 work in a scratch repo:
 
 ```bash
-SF_CHECKOUT=~/skillflow  # ← your SkillFlow checkout
-export PATH="$SF_CHECKOUT/.venv/bin:$PATH"
-export SKILLFLOW_PY="$SF_CHECKOUT/.venv/bin/python"
-mkdir -p /tmp/sf-example/workflows && cd /tmp/sf-example
+mkdir -p /tmp/sf-example && cd /tmp/sf-example
 git init -q .
-cp "$SF_CHECKOUT/workflows/software-change.yaml" workflows/
 skillflow --version
 ```
 
@@ -30,37 +26,25 @@ skillflow --version
 skillflow 0.1.0
 ```
 
-Initialize the workspace, register the definition, and create the Task:
+Create the Task (`start` initializes the workspace, stages the bundled
+Workflow Definition, and registers it):
 
 ```bash
-"$SKILLFLOW_PY" -c "from skillflow.workspace import init_workspace; init_workspace()"
-TASK=$("$SKILLFLOW_PY" - <<'EOF'
-import contextlib
-from skillflow import store, workspace
-from skillflow.service import create_task, register_workflow
-from skillflow.workflow_loader import load_workflow
-
-ws = workspace.Workspace(root=workspace.find_repo_root())
-with contextlib.closing(store.open_store(ws)) as conn:
-    register_workflow(conn, load_workflow(ws.workflows_dir / "software-change.yaml"))
-    task = create_task(conn, title="Ship it", workflow_definition_id="software-change")
-    print(task.id)
-EOF
-)
+TASK=$(skillflow start --title "Ship it")
 echo "$TASK"
 skillflow show-task "$TASK"
 ```
 
 ```text
-task-a0668ec1db08495f93cb7c4b7fe77dbe
-Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it (active)
+task-bc527dba84c3428eb6345f0e08fcf937
+Task task-bc527dba84c3428eb6345f0e08fcf937: Ship it (active)
 Workflow: software-change
-Created: 2026-09-14T16:06:28.766317+00:00 Updated: 2026-09-14T16:06:28.766317+00:00
+Created: 2026-09-15T07:50:42.419314+00:00 Updated: 2026-09-15T07:50:42.419314+00:00
 
 Runs: none
 
 Events (1):
-  2026-09-14T16:06:28.766317+00:00 task.created status=active, workflow_definition_id=software-change
+  2026-09-15T07:50:42.419314+00:00 task.created status=active, workflow_definition_id=software-change
 ```
 
 ## 1. Happy path: research → decomposition → implementation → review
@@ -79,8 +63,8 @@ skillflow complete-run --outcome ready --artifact research.md:research:research.
 ```
 
 ```text
-Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it
-Run run-ad56d693ea464e0795e6b4dc5e9d00a3 (running) -- step 'research' via skill 'skillflow:research'
+Task task-bc527dba84c3428eb6345f0e08fcf937: Ship it
+Run run-c5e5f17729d8486490d58a6867cc4124 (running) -- step 'research' via skill 'skillflow:research'
 Workflow: software-change
 Execution: model: opus, effort: high
 Context: none selected
@@ -91,14 +75,12 @@ Next: do the bounded work for this step, then run `/skillflow:prepare-artifacts`
 [...]
 ✗ research (required)
 [...]
-Run run-ad56d693ea464e0795e6b4dc5e9d00a3 completed.
+Run run-c5e5f17729d8486490d58a6867cc4124 completed.
 
 Next action:
 Run decomposition.
 
-Start the next Run in a new Claude Code session:
-
-/skillflow:resolve-task task-a0668ec1db08495f93cb7c4b7fe77dbe
+Next: /skillflow:work
 ```
 
 Note `✗ research (required)`: `prepare-artifacts` compares expected
@@ -123,11 +105,11 @@ skillflow complete-run --outcome ready --artifact plan.md:plan:plan.md
 
 ```text
 [...]
-Run run-1b1449e1752b43a8aea36d99a0d157e9 (running) -- step 'decomposition' via skill 'skillflow:decomposition'
+Run run-c5cfc01e819c40779ff6c9dda44223d1 (running) -- step 'decomposition' via skill 'skillflow:decomposition'
 Workflow: software-change
 Execution: model: opus, effort: high
 Context:
-  - research.md (research v1): .skillflow/artifacts/task-a0668ec1db08495f93cb7c4b7fe77dbe/research-v1.md
+  - research.md (research v1): .skillflow/artifacts/task-bc527dba84c3428eb6345f0e08fcf937/research-v1.md
 Unresolved context types: review
 Expected outputs:
   - plan (required)
@@ -149,11 +131,11 @@ skillflow complete-run --outcome ready
 
 ```text
 [...]
-Run run-a90ce8cd6151496ba345f0eee5230a6a (running) -- step 'implementation' via skill 'skillflow:implementation'
+Run run-6f9846f3f9eb44a7b8be66aa68559166 (running) -- step 'implementation' via skill 'skillflow:implementation'
 Workflow: software-change
 Execution: model: sonnet, effort: high
 Context:
-  - plan.md (plan v1): .skillflow/artifacts/task-a0668ec1db08495f93cb7c4b7fe77dbe/plan-v1.md
+  - plan.md (plan v1): .skillflow/artifacts/task-bc527dba84c3428eb6345f0e08fcf937/plan-v1.md
 Unresolved context types: review
 Expected outputs: none declared
 [...]
@@ -178,25 +160,25 @@ skillflow show-task "$TASK"
 [...]
 Task status:
 completed
-Task task-a0668ec1db08495f93cb7c4b7fe77dbe: Ship it (completed)
+Task task-bc527dba84c3428eb6345f0e08fcf937: Ship it (completed)
 [...]
 Runs (4):
 
-  [1] run-ad56d693ea464e0795e6b4dc5e9d00a3 (completed) -- step 'research', workflow 'software-change'
+  [1] run-c5e5f17729d8486490d58a6867cc4124 (completed) -- step 'research', workflow 'software-change'
       trigger: initial
-      started: 2026-09-14T16:06:28.935463+00:00  completed: 2026-09-14T16:06:29.111525+00:00
-      Result result-82f118bb43af487c95ce4f27ddd041c7 (completed)
+      started: 2026-09-15T07:50:46.908109+00:00  completed: 2026-09-15T07:50:47.117312+00:00
+      Result result-0b036fefbdaf48e7ac9f3e332ac03bd1 (completed)
         outcome: research/ready
       Artifacts:
-        - research.md (research v1) id artifact-a03394584ddb4458a301257464d9e3be path task-a0668ec1db08495f93cb7c4b7fe77dbe/research-v1.md
+        - research.md (research v1) id artifact-37932153acd44d779f41e17a1b83136c path task-bc527dba84c3428eb6345f0e08fcf937/research-v1.md
       Decisions: none
 
   [2..4] ... (decomposition, implementation, review — same shape)
 
 Events (17):
-  2026-09-14T16:06:28.766317+00:00 task.created status=active, workflow_definition_id=software-change
+  2026-09-15T07:50:42.419314+00:00 task.created status=active, workflow_definition_id=software-change
   [...]
-  2026-09-14T16:06:29.643907+00:00 task.status_changed run run-5e15788647ed4c678434819306cfd7d5 action=complete, from=active, reason=approved, to=completed
+  2026-09-15T07:50:53.333517+00:00 task.status_changed run run-b3ef50b32a4941b39fd6bb1244bd0bd6 action=complete, from=active, reason=approved, to=completed
   [...]
 ```
 
@@ -211,14 +193,7 @@ and reuses the `research.md` / `plan.md` files. Drive to review,
 then answer `changes_requested` instead of `approved`:
 
 ```bash
-TASK2=$("$SKILLFLOW_PY" -c "
-import contextlib
-from skillflow import store, workspace
-from skillflow.service import create_task
-ws = workspace.Workspace(root=workspace.find_repo_root())
-with contextlib.closing(store.open_store(ws)) as conn:
-    print(create_task(conn, title='Rework demo', workflow_definition_id='software-change').id)
-")
+TASK2=$(skillflow start --title "Rework demo")
 skillflow resolve-task "$TASK2" >/dev/null
 skillflow complete-run --outcome ready --artifact research.md:research:research.md >/dev/null
 skillflow resolve-task "$TASK2" >/dev/null
@@ -250,7 +225,7 @@ skillflow resolve-task "$TASK2"
 
 ```text
 [...]
-Run run-bd1c636e5b9141458a7c6b55e3834ecf (running) -- step 'implementation' via skill 'skillflow:implementation'
+Run run-ba9ce92808e24701b4bc760f82035230 (running) -- step 'implementation' via skill 'skillflow:implementation'
 Workflow: software-change
 Execution: model: sonnet, effort: high
 Context:
@@ -289,14 +264,7 @@ The Task completes with 6 Runs.
 Drive to review and answer `human_required`:
 
 ```bash
-TASK3=$("$SKILLFLOW_PY" -c "
-import contextlib
-from skillflow import store, workspace
-from skillflow.service import create_task
-ws = workspace.Workspace(root=workspace.find_repo_root())
-with contextlib.closing(store.open_store(ws)) as conn:
-    print(create_task(conn, title='Decision demo', workflow_definition_id='software-change').id)
-")
+TASK3=$(skillflow start --title "Decision demo")
 skillflow resolve-task "$TASK3" >/dev/null
 skillflow complete-run --outcome ready --artifact research.md:research:research.md >/dev/null
 skillflow resolve-task "$TASK3" >/dev/null
@@ -320,7 +288,7 @@ Human decision required.
 Use:
 
 /skillflow:decide <decision>
-skillflow resolve-task: HumanDecisionRequired: task 'task-54ecbb15ab874aee88859dd477483539' is 'waiting_for_human'; record a decision with `skillflow decide <decision>`, then run `skillflow resolve-task task-54ecbb15ab874aee88859dd477483539`
+skillflow resolve-task: HumanDecisionRequired: task 'task-a41c2f277e0041168bdac19c84fd7c50' is 'waiting_for_human' (step 'review' of run 'run-41a119f5de7549709898849fa79c2f82'); allowed decisions: approve, request_changes, cancel; artifacts: review.md (review v1): .skillflow/artifacts/task-a41c2f277e0041168bdac19c84fd7c50/review-v1.md; record a decision with `skillflow decide <decision> --task task-a41c2f277e0041168bdac19c84fd7c50`, then run `skillflow resolve-task task-a41c2f277e0041168bdac19c84fd7c50`
 No Run was created.
 exit: 1
 ```
@@ -370,32 +338,25 @@ Resolve, fail the Run with diagnostics, watch the Task stay active,
 and retry by resolving again — a new Run, same step:
 
 ```bash
-TASK4=$("$SKILLFLOW_PY" -c "
-import contextlib
-from skillflow import store, workspace
-from skillflow.service import create_task
-ws = workspace.Workspace(root=workspace.find_repo_root())
-with contextlib.closing(store.open_store(ws)) as conn:
-    print(create_task(conn, title='Failure demo', workflow_definition_id='software-change').id)
-")
+TASK4=$(skillflow start --title "Failure demo")
 skillflow resolve-task "$TASK4" >/dev/null
 skillflow fail-run --message "Test harness hung; see output.log"
 skillflow resolve-task "$TASK4"
 ```
 
 ```text
-Run run-ed789fc5e1ef4c1088210aaad88191c1 failed.
+Run run-d89189862f874171a65509651660cd3f failed.
 
 Task status:
 active
 
-Diagnostics: runs/run-ed789fc5e1ef4c1088210aaad88191c1/output.log
+Diagnostics: runs/run-d89189862f874171a65509651660cd3f/output.log
 
 Next action:
 Run research.
 [...]
-Task task-0c4415abcb99407ca7e06ff7941bea91: Failure demo
-Run run-04e434a1d082483a96d290ce3006a429 (running) -- step 'research' via skill 'skillflow:research'
+Task task-393e86200e624455bcf1d9f67f7ac017: Failure demo
+Run run-0b77302bea244b31b24240318a8dff11 (running) -- step 'research' via skill 'skillflow:research'
 Workflow: software-change
 ```
 
@@ -416,6 +377,15 @@ A Task created without a Workflow refuses to resolve until one is
 assigned. SkillFlow never selects one — it lists what is available:
 
 ```bash
+# The selection demo needs a Python that can `import skillflow` — the
+# interpreter behind your `skillflow`. With a checkout that is the venv
+# script's shebang python; with a plugin install, the venv beside the shim:
+SF_BIN="$(command -v skillflow)"
+if head -n 1 "$SF_BIN" | grep -q '^#!.*python'; then
+  SKILLFLOW_PY="$(head -n 1 "$SF_BIN" | cut -c3- | cut -d' ' -f1)"
+else
+  SKILLFLOW_PY="$(dirname "$(dirname "$SF_BIN")")/.venv/bin/python"
+fi
 TASK5=$("$SKILLFLOW_PY" -c "
 import contextlib
 from skillflow import store, workspace
@@ -429,11 +399,11 @@ skillflow resolve-task "$TASK5" --workflow software-change
 ```
 
 ```text
-skillflow resolve-task: WorkflowSelectionRequired: task 'task-2ec04ec7382348a2b845c648fdf83f03' has no Workflow Definition and none was given; SkillFlow never selects one. available Workflow Definitions: 'software-change'; re-run as `skillflow resolve-task task-2ec04ec7382348a2b845c648fdf83f03 --workflow NAME`
+skillflow resolve-task: WorkflowSelectionRequired: task 'task-873b32777e404a83a55a1c13565773db' has no Workflow Definition and none was given; SkillFlow never selects one. available Workflow Definitions: 'software-change'; re-run as `skillflow resolve-task task-873b32777e404a83a55a1c13565773db --workflow NAME`
 No Run was created.
 exit: 1
-Task task-2ec04ec7382348a2b845c648fdf83f03: Unassigned
-Run run-8938f82c939845b3850798a0bf820c11 (running) -- step 'research' via skill 'skillflow:research'
+Task task-873b32777e404a83a55a1c13565773db: Unassigned
+Run run-fe88160ff0a0413a997e321dd78ca795 (running) -- step 'research' via skill 'skillflow:research'
 Workflow: software-change
 ```
 

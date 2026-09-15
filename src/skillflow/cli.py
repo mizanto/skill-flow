@@ -357,10 +357,10 @@ def format_completion(completion: RunCompletion) -> str:
     """Render a ``RunCompletion`` as human-readable text.
 
     Pure formatting, branching on the evaluated action (SF-A-5 §6.10): a
-    ``run`` action targeting a step prints the next step with the
-    ``/skillflow:resolve-task`` pointer for a new Claude Code session; a
-    ``run`` action targeting only a skill prints the skill and reason with
-    the same pointer (skill-targeted Runs resolve since SF-32); ``human``
+    ``run`` action targeting a step prints the next step with the ``Next:
+    `/skillflow:work` `` continuation line; a ``run`` action targeting only
+    a skill prints the skill and reason with the same continuation line
+    (skill-targeted Runs resolve since SF-32); ``human``
     prints the ``/skillflow:decide`` pointer; ``complete`` / ``cancel``
     print the terminal Task status (§6.10 has no cancel template, so its
     shape is derived from §6.9); a ``None`` action (a decisionless
@@ -383,9 +383,7 @@ def format_completion(completion: RunCompletion) -> str:
         else:
             lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
         lines.append("")
-        lines.append("Start the next Run in a new Claude Code session:")
-        lines.append("")
-        lines.append(f"/skillflow:resolve-task {completion.task.id}")
+        lines.append("Next: /skillflow:work")
         return "\n".join(lines)
     if action.action is ActionType.HUMAN:
         lines.append("Next action:")
@@ -405,11 +403,11 @@ def format_decision(record: DecisionRecord) -> str:
     """Render a ``DecisionRecord`` as human-readable text.
 
     Pure formatting, branching on the evaluated action (SF-A-5 §7.8): a
-    ``run`` action targeting a step prints the next step with the
-    ``/skillflow:resolve-task`` pointer for a new Claude Code session; a
-    ``run`` action targeting only a skill prints the skill and reason with
-    the same pointer (skill-targeted Runs resolve since SF-32) -- both
-    mirroring :func:`format_completion`; ``complete`` / ``cancel`` print
+    ``run`` action targeting a step prints the next step with the ``Next:
+    `/skillflow:work` `` continuation line; a ``run`` action targeting only
+    a skill prints the skill and reason with the same continuation line
+    (skill-targeted Runs resolve since SF-32) -- both mirroring
+    :func:`format_completion`; ``complete`` / ``cancel`` print
     §7.8's terminal sentence. A ``human`` action raises ``ValueError``
     instead of rendering: it is unreachable by construction
     (``WorkflowStep`` rejects a ``decisions`` rule with ``action: human``),
@@ -425,9 +423,7 @@ def format_decision(record: DecisionRecord) -> str:
         else:
             lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
         lines.append("")
-        lines.append("Start the next Run in a new Claude Code session:")
-        lines.append("")
-        lines.append(f"/skillflow:resolve-task {record.task.id}")
+        lines.append("Next: /skillflow:work")
         return "\n".join(lines)
     if action.action is ActionType.HUMAN:
         raise ValueError(
@@ -448,10 +444,10 @@ def format_failure(failure: RunFailure) -> str:
     and the evaluated retry action -- always ``run``, so this is
     straight-line on that invariant (the failed rule returns ``run`` by
     construction). A ``run`` action targeting a step prints the next step
-    with the ``/skillflow:resolve-task`` pointer for a new Claude Code
-    session; targeting only a skill prints the skill and reason with the
-    same pointer -- both mirroring :func:`format_completion`. No lifecycle
-    state is re-derived here.
+    with the ``Next: `/skillflow:work` `` continuation line; targeting only
+    a skill prints the skill and reason with the same continuation line --
+    both mirroring :func:`format_completion`. No lifecycle state is
+    re-derived here.
     """
     lines = [f"Run {failure.run.id} failed.", ""]
     lines.append("Task status:")
@@ -472,9 +468,7 @@ def format_failure(failure: RunFailure) -> str:
     else:
         lines.append(f"Run skill {action.skill!r} (reason: {action.reason}).")
     lines.append("")
-    lines.append("Start the next Run in a new Claude Code session:")
-    lines.append("")
-    lines.append(f"/skillflow:resolve-task {failure.task.id}")
+    lines.append("Next: /skillflow:work")
     return "\n".join(lines)
 
 

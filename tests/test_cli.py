@@ -672,7 +672,7 @@ def test_complete_run_vertical_slice(cli_conn, cli_ws, capsys):
     assert f"Run {run.id} completed." in out
     assert "Next action:" in out
     assert "Run decomposition." in out
-    assert f"/skillflow:resolve-task {task.id}" in out
+    assert "Next: /skillflow:work" in out
     done = store.get_run(cli_conn, run.id)
     assert done.status is RunStatus.COMPLETED
     assert done.completed_at is not None
@@ -733,7 +733,7 @@ def test_complete_run_changes_requested_points_at_implementation(
 
     out = capsys.readouterr().out
     assert "Run implementation." in out
-    assert f"/skillflow:resolve-task {task.id}" in out
+    assert "Next: /skillflow:work" in out
     assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
     # The reported pointer works: the next Run starts in a new resolution.
     assert main(["resolve-task", task.id]) == 0
@@ -1323,7 +1323,7 @@ def test_complete_run_skill_targeted_run_reports_trigger_step_outcome(
     out = capsys.readouterr().out
     assert f"Run {skill_run.id} completed." in out
     assert "Run decomposition." in out
-    assert f"/skillflow:resolve-task {task.id}" in out
+    assert "Next: /skillflow:work" in out
     assert store.get_run(cli_conn, skill_run.id).status is RunStatus.COMPLETED
     result = store.get_result_for_run(cli_conn, skill_run.id)
     assert (result.outcome.type, result.outcome.decision) == (
@@ -1376,15 +1376,13 @@ def test_format_completion_run_with_step():
         "Next action:\n"
         "Run decomposition.\n"
         "\n"
-        "Start the next Run in a new Claude Code session:\n"
-        "\n"
-        "/skillflow:resolve-task task-1"
+        "Next: /skillflow:work"
     )
 
 
-def test_format_completion_run_with_skill_points_at_resolve_task():
+def test_format_completion_run_with_skill_points_at_work():
     # SF-32 flips the SF-29 rationale: skill-targeted Runs resolve, so the
-    # pointer is printed.
+    # pointer is printed. SF-53 points the continuation at the driver.
     completion = _completion(
         action=EvaluationOutput(
             action=ActionType.RUN,
@@ -1401,9 +1399,7 @@ def test_format_completion_run_with_skill_points_at_resolve_task():
         "Next action:\n"
         "Run skill 'research' (reason: fundamental_assumption_wrong).\n"
         "\n"
-        "Start the next Run in a new Claude Code session:\n"
-        "\n"
-        "/skillflow:resolve-task task-1"
+        "Next: /skillflow:work"
     )
 
 
@@ -1497,7 +1493,7 @@ def test_decide_request_changes_points_at_implementation(cli_conn, cli_ws, capsy
     assert "Human decision recorded: request_changes." in out
     assert "Next action:" in out
     assert "Run implementation." in out
-    assert f"/skillflow:resolve-task {task.id}" in out
+    assert "Next: /skillflow:work" in out
     assert store.get_task(cli_conn, task.id).status is TaskStatus.ACTIVE
     (decision,) = store.list_human_decisions_for_task(cli_conn, task.id)
     assert decision.decision == "request_changes"
@@ -1679,13 +1675,11 @@ def test_format_decision_run_with_step():
         "Next action:\n"
         "Run implementation.\n"
         "\n"
-        "Start the next Run in a new Claude Code session:\n"
-        "\n"
-        "/skillflow:resolve-task task-1"
+        "Next: /skillflow:work"
     )
 
 
-def test_format_decision_run_with_skill_points_at_resolve_task():
+def test_format_decision_run_with_skill_points_at_work():
     record = _record(
         action=EvaluationOutput(
             action=ActionType.RUN, reason="research", skill="research"
@@ -1698,9 +1692,7 @@ def test_format_decision_run_with_skill_points_at_resolve_task():
         "Next action:\n"
         "Run skill 'research' (reason: research).\n"
         "\n"
-        "Start the next Run in a new Claude Code session:\n"
-        "\n"
-        "/skillflow:resolve-task task-1"
+        "Next: /skillflow:work"
     )
 
 
@@ -1768,7 +1760,7 @@ def test_fail_run_vertical_slice(cli_conn, cli_ws, capsys):
     assert f"Diagnostics: runs/{run.id}/output.log" in out
     assert "Next action:" in out
     assert "Run requirements." in out
-    assert f"/skillflow:resolve-task {task.id}" in out
+    assert "Next: /skillflow:work" in out
     done = store.get_run(cli_conn, run.id)
     assert done.status is RunStatus.FAILED
     assert done.completed_at is not None
@@ -1965,9 +1957,7 @@ def test_format_failure_step_run():
         "Next action:\n"
         "Run requirements.\n"
         "\n"
-        "Start the next Run in a new Claude Code session:\n"
-        "\n"
-        "/skillflow:resolve-task task-1"
+        "Next: /skillflow:work"
     )
 
 
@@ -1983,7 +1973,7 @@ def test_format_failure_skill_run():
     rendered = format_failure(_failure(step=None, skill="research"))
 
     assert "Run skill 'research' (reason: run_failed)." in rendered
-    assert "/skillflow:resolve-task task-1" in rendered
+    assert "Next: /skillflow:work" in rendered
 
 
 def test_format_failure_non_run_action_raises():

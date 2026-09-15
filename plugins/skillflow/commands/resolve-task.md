@@ -1,19 +1,21 @@
 ---
-description: Resolve a SkillFlow Task into a new running Run and start this session's bounded work. Use first, in a new Claude Code session, before doing any Task work.
+description: Resolve a SkillFlow Task into a new running Run and start this context's bounded work. Use first, before doing any Task work.
 argument-hint: '<task-id>'
 allowed-tools: "Bash(skillflow:*)"
 ---
 
 # /skillflow:resolve-task
 
+> Manual entry point: /skillflow:work is the normal path; use this command directly for manual or recovery operation.
+
 Start a SkillFlow Run: validate the Task, create exactly one `running` Run,
-and perform only that Run's bounded work in this session.
+and perform only that Run's bounded work in this execution context.
 
 ## Prerequisites
 
 - The `skillflow` CLI must be on PATH. Check with `skillflow --version`; if it
-  is missing, install it per the SkillFlow README Development section, then
-  continue. Do not proceed without the runtime.
+  is missing, install it per the SkillFlow quick-start (`docs/quick-start.md`),
+  then continue. Do not proceed without the runtime.
 - Run every command from inside the target repository (its root is
   recommended). SkillFlow locates lifecycle state by walking up from the
   working directory.
@@ -37,8 +39,8 @@ Never invent a Task id, step, skill, or Workflow.
    durable context, and expected outputs. Treat it as the assignment for
    this session.
 3. Do the bounded work for the resolved step with ordinary Claude Code tools
-   (Read, Write, Edit, Bash, MCP). Nothing else: do not start, continue, or
-   resume any other Run in this session.
+   (Read, Write, Edit, Bash, MCP). Nothing else: this execution context
+   performs only this Run; continue with `/skillflow:work`.
 4. When the work is done, continue with `/skillflow:prepare-artifacts`.
 
 ## Recovery
@@ -64,8 +66,8 @@ anything under `.skillflow/`.
 
 ## Rules
 
-- One Run per session. A Run is never resumed; retry or continuation is always
-  a new Run in a new session via this command. A failed Run does not fail the
+- One Run per execution context. A Run is never resumed; retry or
+  continuation is always a new Run. A failed Run does not fail the
   Task.
 - Lifecycle state changes only through the four `/skillflow:*` commands.
   Never hand-edit anything under `.skillflow/` (database rows, artifact

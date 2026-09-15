@@ -13,8 +13,8 @@ codes and its stderr envelope (`skillflow <command>: <CODE>: <message>`).
 ## Prerequisites
 
 - The SkillFlow CLI must be on PATH. Check with `skillflow --version` via the
-  Bash tool; if it is missing, install it per the SkillFlow README Development
-  section, then continue. Do not proceed without the runtime.
+  Bash tool; if it is missing, install it per the SkillFlow quick-start
+  (`docs/quick-start.md`), then continue. Do not proceed without the runtime.
 - Run every command from inside the target repository (its root is
   recommended). SkillFlow locates lifecycle state by walking up from the
   working directory.

@@ -5,6 +5,8 @@ allowed-tools: "Bash(skillflow:*)"
 
 # /skillflow:complete-run
 
+> Manual entry point: /skillflow:work is the normal path; use this command directly for manual or recovery operation.
+
 Finish the current `running` Run exactly once. On success the runtime
 registers artifacts, creates exactly one canonical Result, marks the Run
 `completed`, evaluates the lifecycle, and reports the next action. It never
@@ -13,8 +15,8 @@ creates the next Run.
 ## Prerequisites
 
 - The `skillflow` CLI must be on PATH. Check with `skillflow --version`; if it
-  is missing, install it per the SkillFlow README Development section, then
-  continue. Do not proceed without the runtime.
+  is missing, install it per the SkillFlow quick-start (`docs/quick-start.md`),
+  then continue. Do not proceed without the runtime.
 - Run every command from inside the target repository (its root is
   recommended). SkillFlow locates lifecycle state by walking up from the
   working directory, and artifact file paths resolve from it.
@@ -43,18 +45,18 @@ creates the next Run.
    accomplished (write this yourself -- the runtime reports lifecycle facts,
    not the work), the next action, and the exact entry command from the
    output. Never invent a different next step or command:
-   - step-targeted `run`: give the `/skillflow:resolve-task <task-id>`
-     pointer and state that it runs in a new Claude Code session;
+   - step-targeted `run`: give the `Next: /skillflow:work` line from the
+     output (manual alternative: `/skillflow:resolve-task <task-id>`);
    - skill-only `run`: report the skill and reason, and give the
-     `/skillflow:resolve-task <task-id>` pointer for a new Claude Code
-     session (skill-targeted Runs resolve);
+     `Next: /skillflow:work` line (manual alternative:
+     `/skillflow:resolve-task <task-id>`);
    - `human`: report that a human decision is required and give
      `/skillflow:decide <decision>`;
    - `complete` / `cancel`: report the terminal Task status.
-5. End the session's lifecycle work here. Never invoke
-   `/skillflow:resolve-task` again in this session: completing never creates
+5. End this context's lifecycle work here. Never invoke
+   `/skillflow:resolve-task` again in this context: completing never creates
    the next Run, not even for a `run` action. A `run` result means "Task stays
-   `active`; start the next Run later", never "continue working now".
+   `active`; continue with `/skillflow:work`", never "continue working now".
 
 ## If the Run failed
 
@@ -71,7 +73,7 @@ skillflow fail-run --task <task-id> --message "<failure summary>" [--artifact NA
 It marks the Run `failed` with a failed Result, stores the summary in
 `runs/<run-id>/output.log`, registers the partial outputs so the retry can
 use them, and leaves the Task `active`. The retry is a new Run via
-`/skillflow:resolve-task <task-id>` in a new Claude Code session; it
+`/skillflow:work` (manual: `/skillflow:resolve-task <task-id>`); it
 receives a clean same-step assignment, never the diagnostics.
 
 ## Recovery
