@@ -19,7 +19,7 @@ Inside Claude Code, add the marketplace and install the plugin:
 /plugin install skillflow
 ```
 
-Check the runtime resolves from the Bash tool:
+Ask Claude to confirm the runtime resolves from its Bash tool:
 
 ```text
 skillflow --version
@@ -36,17 +36,19 @@ From inside any git repository, describe the work:
 /skillflow:work "Create hello.txt containing hello"
 ```
 
-SkillFlow creates the Task and drives it to Done: it resolves each Run,
-dispatches the assigned Execution Skill in a forked context (research →
-decomposition → implementation → review for the bundled `software-change`
-Workflow), and continues until the Task is `completed`. You watch; you do
-not start Runs yourself.
+That one command creates the Task and starts the loop: SkillFlow runs each
+stage through a dedicated Skill (research → decomposition → implementation
+→ review for the bundled `software-change` Workflow) and continues until
+the Task is `completed`. You watch; you do not start Runs yourself, pick
+Skills, or handle Task and Run IDs.
 
 ## 3. First-run approvals
 
-The first run asks you to approve the tools SkillFlow uses: running the
-`skillflow` CLI, dispatching Execution Skills, and asking you questions.
-Approve the Execution Skills once — every later Run reuses that approval.
+The first run may ask you to approve tools the Skills use — typically
+reading and writing files and running shell commands for the step work.
+The SkillFlow Skills come with their `skillflow` CLI permissions
+pre-approved; approve the remaining file and shell prompts and later runs
+ask less.
 
 ## 4. Where artifacts live
 
@@ -79,9 +81,9 @@ Run is always new.
 ## 6. Human decisions
 
 When a review needs a human call, the driver shows you the review artifact
-path(s) and asks. Pick one of the offered decisions and add an optional
-comment; the loop continues from there. The decision and its comment are
-recorded durably with the Task.
+path(s) and asks. Pick one of the offered decisions — approve, request
+changes, or cancel — and add an optional comment; the loop continues from
+there. The decision and its comment are recorded durably with the Task.
 
 ## 7. Committing `.skillflow/`
 
@@ -99,7 +101,7 @@ status, ordered Runs with provenance, per-Run Results, artifact references,
 recorded decisions, and lifecycle events. It changes nothing.
 
 When a Run fails, the Task stays `active` and the next Run retries the same
-step (or skill). Inspect the failure first:
+step (or skill). Ask Claude to inspect the failure first:
 
 ```text
 skillflow show-task <task-id>

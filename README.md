@@ -37,22 +37,20 @@ Instead of passing an entire conversation to the next session, Skill Flow select
 
 ## How it works
 
-`/skillflow:work "<task>"` drives the loop: each Run is dispatched to an
-Execution Skill in a forked context with only the durable context it needs.
+`/skillflow:work "<task>"` drives the loop: SkillFlow runs each stage of the
+workflow through a dedicated Skill, passing only durable artifacts forward.
+You never pick a Skill or handle Task and Run IDs.
 
 ```text
 /skillflow:work "<task>"
         ↓
-resolve-task → dispatched skill (forked context) → complete-run
+Research → Decomposition → Implementation → Review
         ↓
- Lifecycle Evaluation
-        ↓
-   next action (`Next: /skillflow:work`)
+   Task completed
 ```
 
-The driver continues until the Task is terminal. Skill Flow does not
-automatically launch Claude Code in the MVP: dispatch is Claude-side Skill
-invocation, not runtime-side launching.
+The driver continues until the Task is complete, asking you only when a
+human decision is required.
 
 ## Commands
 
@@ -90,7 +88,8 @@ New here? Start with the [quick-start](docs/quick-start.md), then the
 ## Installation
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.14 or newer.
-Inside Claude Code:
+This is a normal Claude Code plugin installation — you do not need to clone
+the repository or install anything manually. Inside Claude Code:
 
 ```text
 /plugin marketplace add https://github.com/mizanto/skill-flow
