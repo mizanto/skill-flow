@@ -276,7 +276,9 @@ class Workflow:
     """A loaded Workflow Definition: a name and an ordered list of steps.
 
     Distinct from ``domain.WorkflowDefinition`` (the ``(id, name)`` identity row
-    a ``Task`` references). Binding the two by id is SF-008 / SF-010's job.
+    a ``Task`` references). The two are bound by id: ``register_workflow``
+    persists ``id == name``, and ``load_definition`` enforces agreement on
+    every resolve.
 
     Cross-step validation runs at construction: step ids are unique, and every
     ``OutcomeRule.step`` (in any step's ``outcomes`` or ``decisions``) names an

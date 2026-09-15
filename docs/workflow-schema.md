@@ -12,7 +12,8 @@ Command Contract v0 (SF-A-5 §4.8, §6.5, §7), Implementation Plan v0 (SF-A-6 �
 - **Not persisted.** SQLite stores only `domain.WorkflowDefinition` — an
   `(id, name)` identity row a Task references. The loaded procedure
   (`Workflow` / `WorkflowStep`) is configuration read from disk. Binding the two
-  by id is a later issue (SF-008 / SF-010).
+  by id: `register_workflow` persists `id == name`, and `load_definition`
+  enforces agreement on every resolve.
 - **Loaded separately.** `skillflow/workflow.py` is stdlib-only and performs no
   IO; reading a definition file into these objects is
   [`skillflow/workflow_loader.py`](../src/skillflow/workflow_loader.py), covered
@@ -191,9 +192,10 @@ structure, and constructs the value objects, letting their `ValueError` carry
 every semantic rule.
 
 There is no discovery: `load_workflow` reads the path it is given. The reference
-definition lives at [`workflows/software-change.yaml`](../workflows/software-change.yaml);
-how a *target* repository obtains and selects a definition remains SF-11's
-decision. A loaded `Workflow` is configuration, not a runtime entity, and is not
+definition lives at [`workflows/software-change.yaml`](../workflows/software-change.yaml).
+A *target* repository obtains one via `skillflow start` (stages the bundled
+definition) and selects one with `resolve-task --workflow <id>` (permanent
+assignment). A loaded `Workflow` is configuration, not a runtime entity, and is not
 persisted.
 
 ### Lookup by definition id

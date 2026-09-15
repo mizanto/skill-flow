@@ -22,12 +22,14 @@ No validation rule from :mod:`skillflow.workflow` is re-implemented here.
 Three boundaries:
 
 * **No discovery.** ``load_workflow(path)`` reads the path it is given. The
-  reference definition lives at ``workflows/software-change.yaml``; how a target
-  repository selects one is SF-11's decision, so this module imports
+  reference definition lives at ``workflows/software-change.yaml``; a target
+  repository obtains one via ``skillflow start`` and selects one with
+  ``resolve-task --workflow``, so this module imports
   neither :mod:`skillflow.store` nor :mod:`skillflow.workspace` and writes
   nothing to ``.skillflow/``.
 * **No persistence.** A loaded ``Workflow`` is configuration, not a runtime
-  entity, and binding it to ``domain.WorkflowDefinition`` by id is SF-10.
+  entity; it is bound to ``domain.WorkflowDefinition`` by id (``id == name``,
+  enforced by ``load_definition`` on every resolve).
 * **Not a DSL gateway.** A fixed key set at every level with unknown keys
   rejected is precisely what stops the file format drifting into a generic
   workflow DSL. Only the mapping form of an outcome rule
