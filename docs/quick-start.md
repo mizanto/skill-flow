@@ -10,19 +10,14 @@ durable context it needs. For the concepts underneath, see
 ## 1. Install
 
 You need [Claude Code](https://code.claude.com/docs/en/home) and
-[uv](https://docs.astral.sh/uv/). No checkout, no `PATH` edits, no venv.
+[uv](https://docs.astral.sh/uv/) — `uv` provisions Python automatically.
+No checkout, no `PATH` edits, no venv.
 
 Inside Claude Code, add the marketplace and install the plugin:
 
 ```text
 /plugin marketplace add https://github.com/mizanto/skill-flow
 /plugin install skillflow
-```
-
-Ask Claude to confirm the runtime resolves from its Bash tool:
-
-```text
-skillflow --version
 ```
 
 `uv` needs the package index once; afterwards the CLI never needs the
@@ -96,6 +91,9 @@ echo '.skillflow/' >> .gitignore
 
 ## 8. Debugging
 
+You only need this section when something goes wrong — the normal flow
+never requires these commands.
+
 `skillflow show-task <task-id>` prints a read-only view of the Task:
 status, ordered Runs with provenance, per-Run Results, artifact references,
 recorded decisions, and lifecycle events. It changes nothing.
@@ -107,14 +105,19 @@ step (or skill). Ask Claude to inspect the failure first:
 skillflow show-task <task-id>
 ```
 
+To check the install itself rather than a Task, ask Claude to run
+`skillflow --version`: if that fails, the install did not complete —
+re-run the two commands in §1.
+
 For the manual CLI path around failures and decisions, see
 [`user-guide.md`](user-guide.md) and
 [`reference-example.md`](reference-example.md).
 
 ## 9. The manual path
 
-`/skillflow:work` is the normal path. The four lifecycle commands are
-manual/recovery entry points for operating a single Run by hand:
+`/skillflow:work` is the normal path. The four lifecycle commands below are
+manual/recovery entry points for operating a single Run by hand — most
+users never need them:
 
 ```text
 /skillflow:resolve-task <task-id>

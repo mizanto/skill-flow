@@ -6,6 +6,26 @@ Skill Flow connects independent Claude Code sessions into a durable workflow wit
 
 Claude Code does the work. Skill Flow manages what happens between runs.
 
+## Installation
+
+Requires [uv](https://docs.astral.sh/uv/) — it provisions the Python runtime
+automatically, so you do not install Python separately.
+This is a normal Claude Code plugin installation — you do not need to clone
+the repository or install anything manually. Inside Claude Code:
+
+```text
+/plugin marketplace add https://github.com/mizanto/skill-flow
+/plugin install skillflow
+```
+
+Then open any git repository and run `/skillflow:work "<task>"` — the
+[quick-start](docs/quick-start.md) walks through your first Task.
+
+The install needs the package index once; afterwards the CLI never needs
+the network. If the Skills ever report the runtime is missing, ask Claude
+to run `skillflow --version` via its Bash tool to tell a broken install
+apart from a workflow problem.
+
 ## Why
 
 Long-running AI coding sessions accumulate context, tool output, and intermediate reasoning. As the session grows, maintaining a useful context becomes harder and more expensive.
@@ -85,26 +105,6 @@ New here? Start with the [quick-start](docs/quick-start.md), then the
 [user guide](docs/user-guide.md) and the
 [reference example](docs/reference-example.md).
 
-## Installation
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.14 or newer.
-This is a normal Claude Code plugin installation — you do not need to clone
-the repository or install anything manually. Inside Claude Code:
-
-```text
-/plugin marketplace add https://github.com/mizanto/skill-flow
-/plugin install skillflow
-```
-
-Then check the runtime resolves from the Bash tool:
-
-```text
-skillflow --version
-```
-
-The install needs the package index once; afterwards the CLI never needs
-the network.
-
 ## Design principles
 
 - Claude Code remains the execution layer.
@@ -147,7 +147,8 @@ The reference definition ships at [`workflows/software-change.yaml`](workflows/s
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/). On a fresh checkout:
+Requires [uv](https://docs.astral.sh/uv/) (it provisions Python 3.14+
+automatically). On a fresh checkout:
 
 ```bash
 uv sync                          # create .venv with dev dependencies
