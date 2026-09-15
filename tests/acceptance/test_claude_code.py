@@ -13,6 +13,19 @@ lifecycle outcomes via ``skillflow show-task`` and the stream:
   ``probe:canary`` fork skill cannot see a driver-prompt canary.
 * A4 wrong Skill: dispatching ``skillflow:implementation`` while a
   research Run runs yields ``AssignmentMismatch`` with no state change.
+* A5 interruption: CLI ``start`` + ``resolve-task`` leaves research Run R1
+  running; ``/skillflow:work`` re-dispatches ``skillflow:research`` for R1
+  (no second research Run), R1 completes ``research/ready``, and the loop
+  proceeds to a completed Task.
+* A7 assumption recovery: CLI drives research → decomposition →
+  implementation → review ending ``fundamental_assumption_wrong``;
+  ``/skillflow:work`` resolves the next Run as step ``research`` with
+  review v1, plan v1, research v1 as context, whose outcome
+  (``replan``/``ready``) leads through decomposition (plan v2) →
+  implementation → review to a completed Task. The runtime decides the
+  research re-entry; the seeded review only reported the verdict.
+* A6 human decision: manual checklist below (interactive session
+  required; executed once by a human, result recorded on SF-51).
 
 Running:
 
@@ -20,19 +33,21 @@ Running:
 SKILLFLOW_ACCEPTANCE=1 uv run pytest tests/acceptance/test_claude_code.py
 ```
 
-Default ``uv run pytest`` skips the live tests (only
-``test_probe_plugin_structure`` runs: pure file reads). The live tests
-need the ``claude`` CLI, an authenticated account, and API quota; each
-``claude -p`` run costs real money (full module ≈2–3 min at current
-model speeds: one driver run plus two short runs). They never run in
-CI.
+Default ``uv run pytest`` skips the live tests (only the pure tests run:
+``test_probe_plugin_structure``, ``test_repo_rel_resolves_symlinked_repo``,
+``test_review_tail_shape``). The live tests need the ``claude`` CLI, an
+authenticated account, and API quota; each ``claude -p`` run costs real
+money (full module ≈6–8 min at current model speeds: three driver runs
+plus two short runs). They never run in CI.
 
 Design notes:
 
 * A1/A2/A3-first-half share one module-scoped ``driver_run`` fixture
   (one expensive invocation, read-only assertions). The slice check
   (research completed + research v1 + decomposition dispatched) is the
-  committed prefix of A1.
+  committed prefix of A1. A5 and A7 seed their own repos (different
+  pre-state) and each runs the driver once; helpers stay generic over
+  prompt/plugin/grant/timeout for that reuse.
 * Harness assertions precede product assertions in every test, so agent
   non-compliance and product breakage fail differently.
 * Calibrated against ``claude`` 2.1.236: ``stream-json`` requires
@@ -41,9 +56,29 @@ Design notes:
   link is the top-level ``parent_tool_use_id`` (null in-session,
   ``toolu_…`` in forks); a skill's ``!`` preamble is load context and is
   not streamed as tool calls.
-* SF-51 will extend this module (A5 interruption, A7 assumption
-  recovery, A6 manual checklist). Helpers stay generic over
-  prompt/plugin/grant/timeout for that reuse.
+
+A6 manual checklist (cwd = a scratch repo; ``TASK`` is the started id):
+
+```text
+1. skillflow start --title "A6 manual" \
+     --description "Create hello.txt containing hello"  → TASK
+2. CLI-drive research (ready + research.md), decomposition (ready +
+   plan.md), implementation (ready, no artifact) exactly as
+   `_seed_assumption_loop` does (same file).
+3. skillflow resolve-task TASK  → review R4 running; write review.md
+   (verdict human_required plus the decision question); skillflow
+   complete-run --outcome human_required
+   --artifact review.md:review:<path>  → Task waiting_for_human.
+4. skillflow resolve-task TASK  → expect HumanDecisionRequired listing
+   exactly `approve, request_changes, cancel` plus the review v1 path.
+5. Interactive claude session (--plugin-dir plugins/skillflow):
+   /skillflow:work → answer AskUserQuestion `approve` + a comment →
+   expect the decision (+ comment) recorded in show-task and the Task
+   completed.
+6. Repeat 1–4 in a fresh repo; answer `request_changes` → expect an
+   implementation Run dispatched and the loop continuing.
+7. Record pass/fail + transcript excerpts as a comment on SF-51.
+```
 """
 
 from __future__ import annotations
@@ -86,6 +121,15 @@ A4_TIMEOUT = 600
 
 A1_PROMPT = '/skillflow:work "Create hello.txt containing hello"'
 A1_GRANT = ("Skill", "Bash", "Read", "Write", "Edit")
+
+#: Blank ``$ARGUMENTS``: the driver takes the resume path (assignment
+#: re-dispatch when a Run is running, else resolve-task).
+CONTINUE_PROMPT = "/skillflow:work"
+
+A5_TIMEOUT = 1800
+A7_TIMEOUT = 1800
+
+_ASSIGNMENT_COMMAND = re.compile(r"(?:^|[;&|])\s*skillflow assignment\b")
 
 
 def _claude_binary() -> str:
@@ -419,6 +463,32 @@ class DriverRun:
     show_stdout: str
 
 
+def _assert_review_tail(runs: list[RunRecord], start: int, ctx: str) -> None:
+    """Assert ``runs[start:]`` is implementation/review pairs ending approved.
+
+    The tolerated rework shape: one or more ``implementation``/``review``
+    pairs, every implementation ``ready``, every mid-loop review
+    ``changes_requested``, the terminal review ``approved``, every Run
+    completed. Shared by A1/A5/A7.
+    """
+    tail = [run.step for run in runs[start:]]
+    assert len(tail) >= 2 and len(tail) % 2 == 0 and tail == (
+        ["implementation", "review"] * (len(tail) // 2)), (
+        f"tail from index {start} is not implementation/review pairs: "
+        f"{tail}\n{ctx}")
+    for run in runs[start:]:
+        expected = ("implementation/ready" if run.step == "implementation"
+                    else "review/changes_requested")
+        if run is runs[-1]:
+            expected = "review/approved"
+        assert run.outcome == expected, (
+            f"unexpected outcome {run.outcome} for {run.step}, "
+            f"expected {expected}\n{ctx}")
+    assert all(run.status == "completed" for run in runs[start:]), (
+        f"not every tail Run completed: "
+        f"{[(r.step, r.status) for r in runs[start:]]}\n{ctx}")
+
+
 @pytest.fixture(scope="module")
 def driver_run(tmp_path_factory):
     """Run the driver once; A1/A2/A3-first-half assert read-only on it."""
@@ -477,21 +547,9 @@ def test_a1_happy_path_completes_task(driver_run):
     steps = [run.step for run in runs]
     assert steps[:3] == ["research", "decomposition", "implementation"], (
         f"unexpected step prefix {steps}\n{ctx}")
-    tail = steps[2:]
-    assert len(tail) % 2 == 0 and tail == ["implementation", "review"] * (
-        len(tail) // 2), (
-        f"tail after decomposition is not implementation/review pairs: "
-        f"{tail}\n{ctx}")
     assert runs[1].outcome == "decomposition/ready", (
         f"decomposition outcome is not ready: {runs[1].outcome}\n{ctx}")
-    for run in runs[2:]:
-        expected = ("implementation/ready" if run.step == "implementation"
-                    else "review/changes_requested")
-        if run is runs[-1]:
-            expected = "review/approved"
-        assert run.outcome == expected, (
-            f"unexpected outcome {run.outcome} for {run.step}, "
-            f"expected {expected}\n{ctx}")
+    _assert_review_tail(runs, 2, ctx)
     assert all(run.status == "completed" for run in runs), (
         f"not every Run completed: {[(r.step, r.status) for r in runs]}\n{ctx}")
 
@@ -569,6 +627,94 @@ def test_repo_rel_resolves_symlinked_repo(tmp_path):
     assert _repo_rel(link, printed) == printed
     assert _repo_rel(link, "/elsewhere/research-v1.md") == (
         "/elsewhere/research-v1.md")
+
+
+def _tail_record(step: str, outcome: str,
+                 status: str = "completed") -> RunRecord:
+    """Build a ``RunRecord`` for ``_assert_review_tail`` cases."""
+    return RunRecord(step=step, status=status, outcome=outcome)
+
+
+def test_review_tail_shape():
+    """``_assert_review_tail`` accepts pairs, rejects anything else."""
+    ok_one = [_tail_record("implementation", "implementation/ready"),
+              _tail_record("review", "review/approved")]
+    _assert_review_tail(ok_one, 0, "ctx")
+    ok_two = [_tail_record("implementation", "implementation/ready"),
+              _tail_record("review", "review/changes_requested"),
+              _tail_record("implementation", "implementation/ready"),
+              _tail_record("review", "review/approved")]
+    _assert_review_tail(ok_two, 0, "ctx")
+    # A leading prefix is skipped via ``start``.
+    _assert_review_tail(
+        [_tail_record("research", "research/ready"),
+         _tail_record("decomposition", "decomposition/ready"), *ok_one],
+        2, "ctx")
+
+    bad_step = [_tail_record("implementation", "implementation/ready"),
+                _tail_record("research", "research/ready")]
+    with pytest.raises(AssertionError):
+        _assert_review_tail(bad_step, 0, "ctx")
+    bad_mid_outcome = [_tail_record("implementation", "implementation/ready"),
+                       _tail_record("review", "review/approved"),
+                       _tail_record("implementation", "implementation/ready"),
+                       _tail_record("review", "review/approved")]
+    with pytest.raises(AssertionError):
+        _assert_review_tail(bad_mid_outcome, 0, "ctx")
+    bad_terminal = [_tail_record("implementation", "implementation/ready"),
+                    _tail_record("review", "review/changes_requested")]
+    with pytest.raises(AssertionError):
+        _assert_review_tail(bad_terminal, 0, "ctx")
+    bad_status = [_tail_record("implementation", "implementation/ready"),
+                  _tail_record("review", "review/approved",
+                               status="running")]
+    with pytest.raises(AssertionError):
+        _assert_review_tail(bad_status, 0, "ctx")
+    with pytest.raises(AssertionError):
+        _assert_review_tail(ok_one, 2, "ctx")
+
+
+def _chain_row(artifact_id: str, version: int, run_id: str,
+               supersedes_id: str | None) -> tuple[str, int, str, str | None]:
+    """Build an ``_assert_version_chain`` row: (id, version, run, parent)."""
+    return (artifact_id, version, run_id, supersedes_id)
+
+
+def test_version_chain_shape():
+    """``_assert_version_chain`` accepts v1 → vN, rejects broken chains."""
+    live = {"r-live-1", "r-live-2"}
+    ok_two = [_chain_row("a1", 1, "r-seed", None),
+              _chain_row("a2", 2, "r-live-1", "a1")]
+    _assert_version_chain(ok_two, first_owner="r-seed", live_ids=live,
+                          label="review", ctx="ctx")
+    # A tolerated rework cycle grows the review chain past v2: still valid.
+    ok_three = [*ok_two, _chain_row("a3", 3, "r-live-2", "a2")]
+    _assert_version_chain(ok_three, first_owner="r-seed", live_ids=live,
+                          label="review", ctx="ctx")
+
+    with pytest.raises(AssertionError):
+        _assert_version_chain(ok_two[:1], first_owner="r-seed",
+                              live_ids=live, label="review", ctx="ctx")
+    gap = [_chain_row("a1", 1, "r-seed", None),
+           _chain_row("a3", 3, "r-live-1", "a1")]
+    with pytest.raises(AssertionError):
+        _assert_version_chain(gap, first_owner="r-seed", live_ids=live,
+                              label="review", ctx="ctx")
+    wrong_owner = [_chain_row("a1", 1, "r-other", None),
+                   _chain_row("a2", 2, "r-live-1", "a1")]
+    with pytest.raises(AssertionError):
+        _assert_version_chain(wrong_owner, first_owner="r-seed",
+                              live_ids=live, label="review", ctx="ctx")
+    broken_link = [_chain_row("a1", 1, "r-seed", None),
+                   _chain_row("a2", 2, "r-live-1", "a0")]
+    with pytest.raises(AssertionError):
+        _assert_version_chain(broken_link, first_owner="r-seed",
+                              live_ids=live, label="review", ctx="ctx")
+    foreign_run = [_chain_row("a1", 1, "r-seed", None),
+                   _chain_row("a2", 2, "r-seed", "a1")]
+    with pytest.raises(AssertionError):
+        _assert_version_chain(foreign_run, first_owner="r-seed",
+                              live_ids=live, label="review", ctx="ctx")
 
 
 @pytest.mark.acceptance
@@ -815,3 +961,316 @@ def test_a4_wrong_skill_rejected(tmp_path):
         if use.name == "Write":
             assert ".skillflow/runs/" not in use.input.get("file_path", ""), (
                 f"wrong skill wrote Run output\n{ctx}")
+
+
+def _start_task(repo: Path, title: str, description: str) -> str:
+    """Start a Task via the CLI; fail with stderr when it is rejected."""
+    proc = run_skillflow(["start", "--title", title,
+                          "--description", description], cwd=repo)
+    assert proc.returncode == 0, f"start failed:\n{proc.stderr[-2000:]}"
+    return proc.stdout.strip().splitlines()[-1]
+
+
+def _resolve_running(repo: Path, task_id: str) -> str:
+    """Resolve one running Run via the CLI and return its Run id."""
+    proc = run_skillflow(["resolve-task", task_id], cwd=repo)
+    assert proc.returncode == 0, (
+        f"resolve-task failed:\n{proc.stderr[-2000:]}")
+    match = re.search(r"^Run (\S+) \(running\)", proc.stdout, re.M)
+    assert match, f"no running Run in resolve-task output:\n{proc.stdout}"
+    return match.group(1)
+
+
+def _complete_cli_run(repo: Path, *, outcome: str,
+                      submissions: list[tuple[str, str, Path]]) -> None:
+    """Complete the workspace's running Run via the CLI.
+
+    ``submissions`` are (name, type, file) triples; files may live
+    anywhere (absolute paths keep the scratch repo pristine).
+    """
+    args = ["complete-run", "--outcome", outcome]
+    for name, type_, path in submissions:
+        args += ["--artifact", f"{name}:{type_}:{path}"]
+    proc = run_skillflow(args, cwd=repo)
+    assert proc.returncode == 0, (
+        f"complete-run --outcome {outcome} failed:\n{proc.stderr[-2000:]}")
+
+
+#: Fixed seed contents for the A7 assumption loop (first four STEPS rows of
+#: ``test_e2e_fundamental_assumption.py``): minimal but directive, so the
+#: live research skill can replan and the live implementation skill treats
+#: the superseded verdict as stale.
+_SEED_RESEARCH = ("# research\n"
+                  "The task needs hello.txt containing the greeting.\n")
+_SEED_PLAN = "# plan\n1. Write hello.txt containing hello.\n"
+_SEED_REVIEW = ("# review\nverdict: fundamental_assumption_wrong\n"
+                "The plan assumed the required content without checking the "
+                "task description; re-verify the exact file content before "
+                "implementing.\n")
+
+
+def _seed_assumption_loop(repo: Path, scratch: Path) -> tuple[str, list[str]]:
+    """Seed research → decomposition → implementation → review via the CLI.
+
+    The review completes with ``fundamental_assumption_wrong``; seed files
+    live under ``scratch`` (outside the repo). Returns (task id, [R1..R4]).
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    research_path = scratch / "research.md"
+    research_path.write_text(_SEED_RESEARCH, encoding="utf-8")
+    plan_path = scratch / "plan.md"
+    plan_path.write_text(_SEED_PLAN, encoding="utf-8")
+    review_path = scratch / "review.md"
+    review_path.write_text(_SEED_REVIEW, encoding="utf-8")
+
+    task_id = _start_task(repo, "A7 assumption recovery",
+                          "Create hello.txt containing hello")
+    # Strictly interleaved: each running Run completes before the next
+    # resolves (a second resolve while one runs is ActiveRunExists).
+    run_ids = [_resolve_running(repo, task_id)]
+    _complete_cli_run(
+        repo, outcome="ready",
+        submissions=[("research.md", "research", research_path)])
+    run_ids.append(_resolve_running(repo, task_id))
+    _complete_cli_run(
+        repo, outcome="ready",
+        submissions=[("plan.md", "plan", plan_path)])
+    run_ids.append(_resolve_running(repo, task_id))
+    _complete_cli_run(repo, outcome="ready", submissions=[])
+    run_ids.append(_resolve_running(repo, task_id))
+    _complete_cli_run(
+        repo, outcome="fundamental_assumption_wrong",
+        submissions=[("review.md", "review", review_path)])
+    return task_id, run_ids
+
+
+def _top_level_skill_order(uses: list[ToolUse]) -> list[str | None]:
+    """Top-level ``Skill`` dispatch values in stream order (harness helper)."""
+    return [use.input.get("skill") for use in uses
+            if use.name == "Skill" and use.parent is None]
+
+
+def _top_level_bash_commands(uses: list[ToolUse]) -> list[tuple[int, str]]:
+    """(index, command) of every top-level ``Bash`` use (harness helper)."""
+    return [(use.index, use.input.get("command", "")) for use in uses
+            if use.name == "Bash" and use.parent is None]
+
+
+def _assert_version_chain(
+        entries: list[tuple[str, int, str, str | None]], *,
+        first_owner: str, live_ids: set[str], label: str, ctx: str) -> None:
+    """Assert artifact rows form a contiguous v1 → vN version chain.
+
+    ``entries`` are (id, version, run_id, supersedes_id) in version order:
+    versions run 1..N without gaps (a tolerated rework cycle grows the
+    review chain past v2, so no fixed length is assumed), v1 is owned by
+    ``first_owner``, and every later version supersedes its predecessor
+    and is owned by a live Run. Shared by the A7 chain checks; covered by
+    ``test_version_chain_shape``.
+    """
+    versions = [version for _, version, _, _ in entries]
+    assert len(versions) >= 2 and versions == list(
+        range(1, len(versions) + 1)), (
+        f"no contiguous v1 → vN chain for {label}: {entries}\n{ctx}")
+    assert entries[0][2] == first_owner, (
+        f"{label} v1 is not owned by {first_owner}: {entries[0]}\n{ctx}")
+    for prev, cur in zip(entries, entries[1:], strict=False):
+        assert cur[3] == prev[0], (
+            f"{label} v{cur[1]} does not supersede v{prev[1]}: "
+            f"{cur} vs {prev}\n{ctx}")
+        assert cur[2] in live_ids, (
+            f"{label} v{cur[1]} is not owned by a live Run: {cur}\n{ctx}")
+
+
+def _assert_hello_built(repo: Path, ctx: str) -> None:
+    """Assert the hello.txt product outcome (shared by A5/A7)."""
+    hello = repo / "hello.txt"
+    assert hello.is_file(), f"hello.txt was not created\n{ctx}"
+    assert "hello" in hello.read_text(encoding="utf-8"), (
+        f"hello.txt does not contain hello\n{ctx}")
+
+
+@pytest.mark.acceptance
+@requires_acceptance
+def test_a5_interrupted_run_redispatched(tmp_path):
+    """A5: ``/skillflow:work`` re-dispatches the interrupted research Run."""
+    repo = _git_repo(tmp_path / "a5")
+    task_id = _start_task(repo, "A5 interruption",
+                          "Create hello.txt containing hello")
+    r1 = _resolve_running(repo, task_id)
+
+    run = run_claude(cwd=repo, prompt=CONTINUE_PROMPT,
+                     plugin_dirs=(PLUGIN_DIR,), allowed_tools=A1_GRANT,
+                     timeout=A5_TIMEOUT)
+    show = run_skillflow(["show-task", task_id], cwd=repo)
+    ctx = _context_block(run, show.stdout)
+    assert run.returncode == 0, f"driver invocation failed\n{ctx}"
+    uses = collect_tool_uses(run.stream)
+    results = collect_tool_results(run.stream)
+
+    # Harness: the driver re-dispatched research without resolving anew.
+    firsts = list(dict.fromkeys(_top_level_skill_order(uses)))
+    assert firsts[:1] == ["skillflow:research"], (
+        f"driver did not re-dispatch research first (saw {firsts})\n{ctx}")
+    first_dispatch = min(use.index for use in uses
+                         if use.name == "Skill" and use.parent is None)
+    assert not [entry for entry in _resolve_task_outputs(uses, results)
+                if entry[0] < first_dispatch], (
+        f"a resolve-task output precedes the first dispatch: "
+        f"a second Run was resolved before R1 completed\n{ctx}")
+    assert not [command for index, command in _top_level_bash_commands(uses)
+                if index < first_dispatch
+                and _RESOLVE_COMMAND.search(command)], (
+        f"a resolve-task command precedes the first dispatch: the driver "
+        f"did not take the assignment re-dispatch path\n{ctx}")
+    assert any(_ASSIGNMENT_COMMAND.search(command)
+               and index < first_dispatch
+               for index, command in _top_level_bash_commands(uses)), (
+        f"no top-level skillflow assignment before the first dispatch\n{ctx}")
+    assert _only_task_id(repo) == task_id, (
+        f"driver created or switched Tasks\n{ctx}")
+
+    # Product: R1 itself completed research/ready; the loop ran to completion.
+    assert show.returncode == 0, f"show-task failed:\n{show.stderr[-2000:]}"
+    _parsed_id, task_status, runs = parse_show_task(show.stdout)
+    assert runs, f"show-task recorded no Runs\n{ctx}"
+    assert (runs[0].step, runs[0].status) == ("research", "completed"), (
+        f"first Run is not completed research: {runs[0]}\n{ctx}")
+    assert runs[0].outcome == "research/ready", (
+        f"first research outcome is not ready: {runs[0].outcome}\n{ctx}")
+    assert task_status == "completed", (
+        f"Task is not completed (status {task_status})\n{ctx}")
+    steps = [run.step for run in runs]
+    assert steps[:3] == ["research", "decomposition", "implementation"], (
+        f"unexpected step prefix {steps}\n{ctx}")
+    assert runs[1].outcome == "decomposition/ready", (
+        f"decomposition outcome is not ready: {runs[1].outcome}\n{ctx}")
+    _assert_review_tail(runs, 2, ctx)
+    assert all(run.status == "completed" for run in runs), (
+        f"not every Run completed: {[(r.step, r.status) for r in runs]}\n{ctx}")
+    _assert_hello_built(repo, ctx)
+
+    # R1's identity survived: the completed first Run is the seeded one,
+    # with its Result and research v1 — no second research Run exists.
+    ws = workspace.Workspace(root=repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        stored = store.list_runs_for_task(conn, task_id)
+        assert stored and stored[0].id == r1, (
+            f"first stored Run is not the seeded R1 {r1}: "
+            f"{[r.id for r in stored]}\n{ctx}")
+        assert [r.step_id for r in stored].count("research") == 1, (
+            f"more than one research Run: "
+            f"{[(r.id, r.step_id) for r in stored]}\n{ctx}")
+        result = store.get_result_for_run(conn, r1)
+        assert result is not None and result.outcome is not None and (
+            result.outcome.type, result.outcome.decision) == (
+            "research", "ready"), (
+            f"R1 has no research/ready Result: {result}\n{ctx}")
+        r1_artifacts = store.list_artifacts_for_run(conn, r1)
+        assert any(a.type == "research" and a.version == 1
+                   for a in r1_artifacts), (
+            f"R1 holds no research v1: "
+            f"{[(a.name, a.type, a.version) for a in r1_artifacts]}\n{ctx}")
+
+
+@pytest.mark.acceptance
+@requires_acceptance
+def test_a7_assumption_recovery(tmp_path):
+    """A7: the driver recovers from ``fundamental_assumption_wrong``."""
+    repo = _git_repo(tmp_path / "a7")
+    task_id, seeded = _seed_assumption_loop(repo, tmp_path / "a7-seed")
+
+    run = run_claude(cwd=repo, prompt=CONTINUE_PROMPT,
+                     plugin_dirs=(PLUGIN_DIR,), allowed_tools=A1_GRANT,
+                     timeout=A7_TIMEOUT)
+    show = run_skillflow(["show-task", task_id], cwd=repo)
+    ctx = _context_block(run, show.stdout)
+    assert run.returncode == 0, f"driver invocation failed\n{ctx}"
+    uses = collect_tool_uses(run.stream)
+    results = collect_tool_results(run.stream)
+
+    # Harness: research re-entry first, then the normal skill order.
+    firsts = list(dict.fromkeys(_top_level_skill_order(uses)))
+    assert firsts[:4] == ["skillflow:research", "skillflow:decomposition",
+                          "skillflow:implementation", "skillflow:code-review"], (
+        f"driver did not dispatch the four skills in order "
+        f"(saw {firsts})\n{ctx}")
+    first_dispatch = min(use.index for use in uses
+                         if use.name == "Skill" and use.parent is None
+                         and use.input.get("skill") == "skillflow:research")
+    preceding = [entry for entry in _resolve_task_outputs(uses, results)
+                 if entry[0] < first_dispatch and entry[1] == "research"]
+    assert preceding, (
+        f"no research resolve-task output precedes the first research "
+        f"dispatch\n{ctx}")
+    _resolve_index, _step, paths = preceding[-1]
+    store_prefix = f".skillflow/artifacts/{task_id}"
+    assert paths == [f"{store_prefix}/review-v1.md",
+                     f"{store_prefix}/plan-v1.md",
+                     f"{store_prefix}/research-v1.md"], (
+        f"re-entered research context is not review/plan/research v1: "
+        f"{paths}\n{ctx}")
+
+    # Product: seeded prefix, live research re-entry, completion.
+    assert show.returncode == 0, f"show-task failed:\n{show.stderr[-2000:]}"
+    _parsed_id, task_status, runs = parse_show_task(show.stdout)
+    assert len(runs) >= 8, f"expected at least 8 Runs, saw {len(runs)}\n{ctx}"
+    assert [run.step for run in runs[:4]] == [
+        "research", "decomposition", "implementation", "review"], (
+        f"unexpected seeded prefix {[r.step for r in runs[:4]]}\n{ctx}")
+    assert [run.outcome for run in runs[:4]] == [
+        "research/ready", "decomposition/ready", "implementation/ready",
+        "review/fundamental_assumption_wrong"], (
+        f"unexpected seeded outcomes {[r.outcome for r in runs[:4]]}\n{ctx}")
+    assert task_status == "completed", (
+        f"Task is not completed (status {task_status})\n{ctx}")
+    assert runs[4].step == "research" and runs[4].status == "completed", (
+        f"fifth Run is not completed research: {runs[4]}\n{ctx}")
+    assert runs[4].outcome in ("research/replan", "research/ready"), (
+        f"re-entered research outcome is not replan/ready: "
+        f"{runs[4].outcome}\n{ctx}")
+    assert (runs[5].step, runs[5].status) == (
+        "decomposition", "completed"), (
+        f"sixth Run is not completed decomposition: {runs[5]}\n{ctx}")
+    assert runs[5].outcome == "decomposition/ready", (
+        f"re-decomposition outcome is not ready: {runs[5].outcome}\n{ctx}")
+    _assert_review_tail(runs, 6, ctx)
+    assert all(run.status == "completed" for run in runs), (
+        f"not every Run completed: {[(r.step, r.status) for r in runs]}\n{ctx}")
+    _assert_hello_built(repo, ctx)
+
+    # The runtime decided the re-entry: R5's provenance names the seeded
+    # review Run with the verdict as reason; each artifact type forms a
+    # v1 → v2 chain owned by the seeded then the live Run.
+    ws = workspace.Workspace(root=repo)
+    with contextlib.closing(store.open_store(ws)) as conn:
+        stored = store.list_runs_for_task(conn, task_id)
+        assert [r.id for r in stored[:4]] == seeded, (
+            f"seeded Runs differ: {[r.id for r in stored[:4]]} vs "
+            f"{seeded}\n{ctx}")
+        assert stored[4].triggered_by_run_id == seeded[3], (
+            f"R5 was not triggered by the seeded review: "
+            f"{stored[4].triggered_by_run_id}\n{ctx}")
+        assert stored[4].trigger_reason == "fundamental_assumption_wrong", (
+            f"R5 trigger reason is not the verdict: "
+            f"{stored[4].trigger_reason}\n{ctx}")
+        live_ids = {r.id for r in stored[4:]}
+        artifacts = store.list_artifacts_for_task(conn, task_id)
+        rows: dict[str, list[tuple[str, int, str, str | None]]] = {}
+        for artifact in artifacts:
+            rows.setdefault(artifact.type, []).append(
+                (artifact.id, artifact.version, artifact.run_id,
+                 artifact.supersedes_id))
+        # Research and decomposition each run exactly once live, so their
+        # chains stop at v2; review re-runs on every tolerated rework
+        # cycle, so its chain only promises contiguity from v1.
+        for type_, seed_index in (("research", 0), ("plan", 1)):
+            chain = sorted(rows.get(type_, []), key=lambda row: row[1])
+            assert len(chain) == 2, (
+                f"expected exactly v1 → v2 for {type_}: {chain}\n{ctx}")
+            _assert_version_chain(chain, first_owner=seeded[seed_index],
+                                  live_ids=live_ids, label=type_, ctx=ctx)
+        review_chain = sorted(rows.get("review", []),
+                              key=lambda row: row[1])
+        _assert_version_chain(review_chain, first_owner=seeded[3],
+                              live_ids=live_ids, label="review", ctx=ctx)
