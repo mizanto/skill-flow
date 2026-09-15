@@ -1,17 +1,21 @@
-"""Contract tests for the SkillFlow Claude Code plugin (SF-29).
+"""Contract tests for the SkillFlow Claude Code plugin (SF-29, SF-52).
 
-The plugin is static: a manifest plus four command files under
-``plugins/skillflow/``. These tests pin what SF-29's acceptance criteria
-require -- the exact discovery set, valid frontmatter, exactly one
-deterministic runtime operation per skill, required cross-command pointers,
-the prohibited-command list in every file, and no lifecycle business logic
-in skill prose.
+The plugin is static: a root manifest plus marketplace entry, a ``bin/``
+shim, and four command files under ``plugins/skillflow/``. These tests pin
+what SF-29's acceptance criteria require -- the exact discovery set, valid
+frontmatter, exactly one deterministic runtime operation per skill,
+required cross-command pointers, the prohibited-command list in every
+file, and no lifecycle business logic in skill prose -- plus what SF-52
+requires: manifest pointers, the marketplace agreement, the shim
+contract, and no shipped MCP config.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,8 +23,11 @@ import yaml
 
 from skillflow import __version__
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "skillflow"
-COMMANDS_DIR = PLUGIN_ROOT / "commands"
+ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_MANIFEST = ROOT / ".claude-plugin" / "plugin.json"
+MARKETPLACE_MANIFEST = ROOT / ".claude-plugin" / "marketplace.json"
+SHIM = ROOT / "bin" / "skillflow"
+COMMANDS_DIR = ROOT / "plugins" / "skillflow" / "commands"
 
 COMMANDS = ("resolve-task", "prepare-artifacts", "complete-run", "decide")
 
@@ -79,12 +86,90 @@ def _read_command(name: str) -> tuple[dict, str]:
 
 
 def test_manifest_is_valid_and_version_mirrored():
-    manifest = json.loads(
-        (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
     assert manifest["name"] == "skillflow"
     assert manifest["description"]
     assert manifest["version"] == __version__
+    for key in ("commands", "skills"):
+        target = ROOT / str(manifest[key])
+        assert target.is_dir(), f"plugin.json {key} points nowhere: {manifest[key]!r}"
+
+
+def test_marketplace_manifest_agrees_with_plugin_manifest():
+    marketplace = json.loads(MARKETPLACE_MANIFEST.read_text(encoding="utf-8"))
+    manifest = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
+    assert marketplace["name"]
+    assert marketplace["description"]
+    assert marketplace["owner"]["name"]
+    (entry,) = marketplace["plugins"]
+    assert entry["name"] == manifest["name"]
+    assert entry["description"] == manifest["description"]
+    assert entry["version"] == manifest["version"] == __version__
+    assert entry["source"] == "./"
+
+
+def test_no_mcp_config_shipped():
+    # A committed plugin-root .mcp.json is inherited by every install
+    # as the plugin's MCP config (no manifest key suppresses it). A
+    # local dev copy is fine, but the ignore rule must hold: tracked
+    # files are never "ignored", so this one check pins both the
+    # .gitignore entry and the untracked state.
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", ".mcp.json"],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        "root .mcp.json is not ignored; committing it would ship dev MCP "
+        "servers to every plugin user"
+    )
+
+
+def test_shim_contract():
+    assert SHIM.is_file(), "bin/skillflow missing"
+    assert SHIM.stat().st_mode & 0o111, "bin/skillflow lost its exec bit"
+    text = SHIM.read_text(encoding="utf-8")
+    assert text.split("\n", 1)[0] == "#!/bin/sh"
+    for token in (
+        "SKILLFLOW_BUNDLED_WORKFLOWS",  # SF-45 contract: start() staging dir
+        "UV_PROJECT_ENVIRONMENT",
+        "CLAUDE_PLUGIN_DATA",
+        "exec uv run",
+        "--project",
+        '"$@"',
+    ):
+        assert token in text, f"bin/skillflow lost {token!r}"
+
+
+def test_shim_runs_version():
+    # Runs under `uv run` like the rest of the suite, so the project env
+    # is already synced and the shim's inner `uv run --project` is a
+    # fast no-op resolving to this checkout's own CLI.
+    result = subprocess.run(
+        [str(SHIM), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert f"skillflow {__version__}" in result.stdout
+
+
+def test_plugin_validates():
+    # Pins the SF-52 verification bar in-repo: quota-free, and skipped
+    # where the claude CLI is unavailable (mirrors the acceptance
+    # suite's _claude_binary guard).
+    if shutil.which("claude") is None:
+        pytest.skip("claude CLI not on PATH")
+    result = subprocess.run(
+        ["claude", "plugin", "validate", "--strict", str(ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:] + result.stdout[-2000:]
 
 
 def test_commands_directory_contains_exactly_the_four_commands():

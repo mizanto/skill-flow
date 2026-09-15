@@ -1,0 +1,5 @@
+#!/bin/sh
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export SKILLFLOW_BUNDLED_WORKFLOWS="$ROOT/workflows"
+export UV_PROJECT_ENVIRONMENT="${CLAUDE_PLUGIN_DATA:-$ROOT/.venv}"
+exec uv run --quiet --project "$ROOT" skillflow "$@"

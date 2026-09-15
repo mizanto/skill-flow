@@ -323,6 +323,14 @@ resolve-task
 → complete-run
 ```
 
+## Local MCP setup
+
+The repository ships no `.mcp.json`: the repo root is the plugin root, and a
+committed `.mcp.json` would be inherited by every plugin installation (a test
+pins the ignore rule). For local development MCP servers (e.g. `graft`), keep
+a local `.mcp.json` (gitignored — never commit it) or configure them in your
+user-level Claude Code config.
+
 <!-- graft:start -->
 ## Graft — repo context graph
 

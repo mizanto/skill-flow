@@ -14,6 +14,10 @@ test-report.md
 fix-report.md
 final-review.md
 
+# Local dev MCP config: the repo root is the plugin root, and a committed
+# .mcp.json would be inherited by every plugin installation. Never commit.
+.mcp.json
+
 .DS_Store
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).

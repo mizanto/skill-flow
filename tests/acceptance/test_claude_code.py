@@ -1,6 +1,6 @@
 """Claude Code acceptance suite (SF-49): the real vertical slice.
 
-Drives the shipped plugin (``plugins/skillflow/``) through ``claude -p``
+Drives the shipped plugin (the repository root) through ``claude -p``
 with ``--plugin-dir`` and ``--output-format stream-json``, asserting
 lifecycle outcomes via ``skillflow show-task`` and the stream:
 
@@ -71,7 +71,7 @@ A6 manual checklist (cwd = a scratch repo; ``TASK`` is the started id):
    --artifact review.md:review:<path>  → Task waiting_for_human.
 4. skillflow resolve-task TASK  → expect HumanDecisionRequired listing
    exactly `approve, request_changes, cancel` plus the review v1 path.
-5. Interactive claude session (--plugin-dir plugins/skillflow):
+5. Interactive claude session (--plugin-dir <repo root>):
    /skillflow:work → answer AskUserQuestion `approve` + a comment →
    expect the decision (+ comment) recorded in show-task and the Task
    completed.
@@ -102,7 +102,7 @@ from skillflow import store, workspace
 from skillflow.domain import TaskStatus
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PLUGIN_DIR = REPO_ROOT / "plugins" / "skillflow"
+PLUGIN_DIR = REPO_ROOT
 PROBE_PLUGIN_DIR = Path(__file__).resolve().parent / "probe-plugin"
 WORKFLOWS_DIR = REPO_ROOT / "workflows"
 
